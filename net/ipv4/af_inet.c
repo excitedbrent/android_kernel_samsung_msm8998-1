@@ -413,12 +413,14 @@ out_rcu_unlock:
 }
 
 /* START_OF_KNOX_NPA */
+#ifdef CONFIG_KNOX_NCM
 /** The function is used to check if the ncm feature is enabled or not; if enabled then it calls knox_collect_socket_data function in ncm.c to record all the socket data; **/
 static void knox_collect_metadata(struct socket *sock) {
-    if(check_ncm_flag()) {
+	if(check_ncm_flag()) {
 		knox_collect_socket_data(sock);
-    }
+	}
 }
+#endif
 /* END_OF_KNOX_NPA */
 
 /*
@@ -450,9 +452,11 @@ int inet_release(struct socket *sock)
 		if (sock_flag(sk, SOCK_LINGER) &&
 		    !(current->flags & PF_EXITING))
 			timeout = sk->sk_lingertime;
-        /* START_OF_KNOX_NPA */
-        knox_collect_metadata(sock);
-        /* END_OF_KNOX_NPA */
+		/* START_OF_KNOX_NPA */
+#ifdef CONFIG_KNOX_NCM
+		knox_collect_metadata(sock);
+#endif
+		/* END_OF_KNOX_NPA */
 		sock->sk = NULL;
 		sk->sk_prot->close(sk, timeout);
 	}
@@ -774,15 +778,20 @@ int inet_sendmsg(struct socket *sock, struct msghdr *msg, size_t size)
 	    inet_autobind(sk))
 		return -EAGAIN;
 
-	err = sk->sk_prot->sendmsg(sk, msg, size);
-    if (err >= 0) {
-        if(sock->knox_sent + err > ULLONG_MAX) {
-            sock->knox_sent = ULLONG_MAX;
-        } else {
-            sock->knox_sent = sock->knox_sent + err;
-        }
-    }
-    return err;
+    err = sk->sk_prot->sendmsg(iocb, sk, msg, size);
+
+	/* START_OF_KNOX_NPA */
+#ifdef CONFIG_KNOX_NCM
+	if (err >= 0) {
+		if (sock->knox_sent + err > ULLONG_MAX)
+			sock->knox_sent = ULLONG_MAX;
+		else
+			sock->knox_sent = sock->knox_sent + err;
+	}
+#endif
+	/* END_OF_KNOX_NPA */
+
+	return err;
 }
 EXPORT_SYMBOL(inet_sendmsg);
 
@@ -816,13 +825,16 @@ int inet_recvmsg(struct socket *sock, struct msghdr *msg, size_t size,
 	err = sk->sk_prot->recvmsg(sk, msg, size, flags & MSG_DONTWAIT,
 				   flags & ~MSG_DONTWAIT, &addr_len);
 	if (err >= 0) {
-        msg->msg_namelen = addr_len;
-        if(sock->knox_recv + err > ULLONG_MAX) {
-            sock->knox_recv = ULLONG_MAX;
-        } else {
-            sock->knox_recv = sock->knox_recv + err;
-        }
-    }
+		msg->msg_namelen = addr_len;
+		/* START_OF_KNOX_NPA */
+#ifdef CONFIG_KNOX_NCM
+		if (sock->knox_recv + err > ULLONG_MAX)
+			sock->knox_recv = ULLONG_MAX;
+		else
+			sock->knox_recv = sock->knox_recv + err;
+#endif
+		/* END_OF_KNOX_NPA */
+	}
 	return err;
 }
 EXPORT_SYMBOL(inet_recvmsg);
