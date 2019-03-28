@@ -36,6 +36,9 @@
 
 #include "sdhci.h"
 #include "cmdq_hci.h"
+#ifdef CONFIG_SEC_FACTORY
+#include "sdhci-msm.h"
+#endif
 
 #define DRIVER_NAME "sdhci"
 
@@ -1923,6 +1926,10 @@ static void sdhci_do_set_ios(struct sdhci_host *host, struct mmc_ios *ios)
 				mmc_card_sdio(host->mmc->card))
 			sdhci_cfg_irq(host, true, false);
 		spin_unlock_irqrestore(&host->lock, flags);
+#if defined(CONFIG_SEC_HYBRID_TRAY)
+		sdhci_set_power(host, ios->power_mode, ios->vdd);
+		host->ops->set_clock(host, ios->clock);
+#endif
 		return;
 	}
 	spin_unlock_irqrestore(&host->lock, flags);
@@ -3041,11 +3048,6 @@ static void sdhci_data_irq(struct sdhci_host *host, u32 intmask)
 		 * above in sdhci_cmd_irq().
 		 */
 		if (host->cmd && (host->cmd->flags & MMC_RSP_BUSY)) {
-			if (intmask & SDHCI_INT_DATA_TIMEOUT) {
-				host->cmd->error = -ETIMEDOUT;
-				tasklet_schedule(&host->finish_tasklet);
-				return;
-			}
 			if (intmask & SDHCI_INT_DATA_END) {
 				/*
 				 * Some cards handle busy-end interrupt
@@ -3059,8 +3061,20 @@ static void sdhci_data_irq(struct sdhci_host *host, u32 intmask)
 				return;
 			}
 			if (host->quirks2 &
-				SDHCI_QUIRK2_IGNORE_DATATOUT_FOR_R1BCMD)
+				SDHCI_QUIRK2_IGNORE_DATATOUT_FOR_R1BCMD) {
+				pr_err_ratelimited("%s: %s: ignoring interrupt: 0x%08x due to DATATOUT_FOR_R1B quirk\n",
+						mmc_hostname(host->mmc),
+						__func__, intmask);
+				MMC_TRACE(host->mmc,
+					"%s: Quirk ignoring intr: 0x%08x\n",
+						__func__, intmask);
 				return;
+			}
+			if (intmask & SDHCI_INT_DATA_TIMEOUT) {
+				host->cmd->error = -ETIMEDOUT;
+				tasklet_schedule(&host->finish_tasklet);
+				return;
+			}
 		}
 
 		pr_err("%s: Got data interrupt 0x%08x even "
@@ -3113,6 +3127,15 @@ static void sdhci_data_irq(struct sdhci_host *host, u32 intmask)
 			if (!host->mmc->sdr104_wa ||
 			    (host->mmc->ios.timing != MMC_TIMING_UHS_SDR104))
 				sdhci_dumpregs(host);
+#ifdef CONFIG_SEC_FACTORY	// call panic on SDR104 mode
+			if ((host->data->error == -EILSEQ && mmc_gpio_get_cd(host->mmc)) &&
+					(host->mmc->card->sd_bus_speed == UHS_SDR104_BUS_SPEED)) {
+				struct sdhci_pltfm_host *pltfm_host = sdhci_priv(host);
+				struct sdhci_msm_host *msm_host = pltfm_host->priv;
+				if (msm_host->tuning_done)
+					panic("CRC error on SDcard SDR104 mode.\n");
+			}
+#endif
 		}
 		sdhci_finish_data(host);
 	} else {

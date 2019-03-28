@@ -17,7 +17,7 @@ snd-soc-msm8996-objs := msm8996.o apq8096-auto.o
 obj-$(CONFIG_SND_SOC_MSM8996) += snd-soc-msm8996.o
 
 # for MSM8998 sound card driver
-snd-soc-msm8998-objs := msm8998.o
+snd-soc-msm8998-objs := msm8998.o  jack_wcd-mbhc-v2_sysfs_cb.o
 obj-$(CONFIG_SND_SOC_MSM8998) += snd-soc-msm8998.o
 
 # for SDM660 sound card driver

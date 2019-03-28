@@ -60,6 +60,10 @@ struct suspend_stats suspend_stats;
 static DEFINE_MUTEX(dpm_list_mtx);
 static pm_message_t pm_transition;
 
+#ifdef CONFIG_SEC_PM
+extern int wakeup_irq_flag;
+#endif
+
 static int async_error;
 
 static char *pm_verb(int event)
@@ -162,12 +166,6 @@ void device_pm_move_before(struct device *deva, struct device *devb)
 	pr_debug("PM: Moving %s:%s before %s:%s\n",
 		 deva->bus ? deva->bus->name : "No Bus", dev_name(deva),
 		 devb->bus ? devb->bus->name : "No Bus", dev_name(devb));
-	if (!((devb->pm_domain) || (devb->type && devb->type->pm)
-		|| (devb->class && (devb->class->pm || devb->class->resume))
-		|| (devb->bus && (devb->bus->pm || devb->bus->resume)) ||
-		(devb->driver && devb->driver->pm))) {
-		device_pm_add(devb);
-	}
 	/* Delete deva from dpm_list and reinsert before devb. */
 	list_move_tail(&deva->power.entry, &devb->power.entry);
 }
@@ -182,12 +180,6 @@ void device_pm_move_after(struct device *deva, struct device *devb)
 	pr_debug("PM: Moving %s:%s after %s:%s\n",
 		 deva->bus ? deva->bus->name : "No Bus", dev_name(deva),
 		 devb->bus ? devb->bus->name : "No Bus", dev_name(devb));
-	if (!((devb->pm_domain) || (devb->type && devb->type->pm)
-		|| (devb->class && (devb->class->pm || devb->class->resume))
-		|| (devb->bus && (devb->bus->pm || devb->bus->resume)) ||
-		(devb->driver && devb->driver->pm))) {
-		device_pm_add(devb);
-	}
 	/* Delete deva from dpm_list and reinsert after devb. */
 	list_move(&deva->power.entry, &devb->power.entry);
 }
@@ -624,6 +616,10 @@ static int device_resume_early(struct device *dev, pm_message_t state, bool asyn
 
 	TRACE_DEVICE(dev);
 	TRACE_RESUME(0);
+
+#ifdef CONFIG_SEC_PM
+    wakeup_irq_flag = 0;
+#endif
 
 	if (dev->power.syscore || dev->power.direct_complete)
 		goto Out;
@@ -1384,6 +1380,10 @@ static int __device_suspend(struct device *dev, pm_message_t state, bool async)
 		pm_wakeup_event(dev, 0);
 
 	if (pm_wakeup_pending()) {
+		if (!strcmp(dev->kobj.name, "phy-1da7000.ufsphy.0")) { 
+			dev_warn(dev, "phy-1da7000.ufsphy.0 enter pm_wakeup_pending & pm_runtime_status[%d]%s!\n", 
+					pm_runtime_status_suspended(dev),__func__); 
+		} 
 		pm_get_active_wakeup_sources(suspend_abort,
 			MAX_SUSPEND_ABORT_LEN);
 		log_suspend_abort_reason(suspend_abort);
@@ -1393,6 +1393,7 @@ static int __device_suspend(struct device *dev, pm_message_t state, bool async)
 
 	if (dev->power.syscore)
 		goto Complete;
+
 
 	if (dev->power.direct_complete) {
 		if (pm_runtime_status_suspended(dev)) {

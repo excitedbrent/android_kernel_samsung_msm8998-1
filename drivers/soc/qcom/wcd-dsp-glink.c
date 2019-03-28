@@ -41,6 +41,40 @@
 #define QOS_PKT_SIZE 1024
 #define TIMEOUT_MS 1000
 
+#ifndef GRAPHITE_EVENT
+#define GRAPHITE_EVENT 0x000B
+#endif
+
+struct ipc_hdr {
+	uint8_t version;
+	uint8_t reserved;
+	uint16_t opcode;
+	uint8_t client_id;
+	uint8_t domain_id;
+	uint16_t token;
+	uint32_t payload_size;
+} __attribute__((__packed__));
+
+/* IPC(CMI) pkt format */
+struct ipc_pkt {
+	struct ipc_hdr hdr;
+	uint8_t payload[0];
+};
+
+struct detection_engine_event {
+	uint16_t status;
+	uint16_t custom_payload_size;
+	int32_t  ctrl_svt_mode;
+};
+
+struct gcs_cal_header {
+	uint32_t module_id;
+	uint16_t instance_id;
+	uint16_t reserved;
+	uint32_t param_id;
+	uint32_t size;
+};
+
 struct wdsp_glink_dev {
 	struct class *cls;
 	struct device *dev;
@@ -88,6 +122,14 @@ struct wdsp_glink_ch {
 
 	/* Wait for ch connect state before sending any command */
 	wait_queue_head_t ch_connect_wait;
+
+	/*
+	 * Used to check if both local disconnect and remote disconnect
+	 * states are notified before freeing channel resources
+	 */
+	int ch_close_state;
+	/* Wait for ch local and remote disconnect before channel free */
+	wait_queue_head_t ch_free_wait;
 
 	/*
 	 * Glink channel configuration. This has to be the last
@@ -161,8 +203,10 @@ static void wdsp_glink_free_tx_buf(const void *priv, const void *pkt_priv)
 	ch = (struct wdsp_glink_ch *)priv;
 	wpriv = ch->wpriv;
 	/* Work queue to free tx pkt */
-	INIT_WORK(&tx_buf->free_tx_work, wdsp_glink_free_tx_buf_work);
-	queue_work(wpriv->work_queue, &tx_buf->free_tx_work);
+	if (wpriv && wpriv->work_queue) {
+		INIT_WORK(&tx_buf->free_tx_work, wdsp_glink_free_tx_buf_work);
+		queue_work(wpriv->work_queue, &tx_buf->free_tx_work);
+	}
 }
 
 /*
@@ -360,7 +404,7 @@ static void wdsp_glink_notify_state(void *handle, const void *priv,
 				ch->ch_cfg.name);
 
 		wake_up(&ch->ch_connect_wait);
-		mutex_unlock(&ch->mutex);
+		ch->ch_close_state = 0;
 	} else if (event == GLINK_LOCAL_DISCONNECTED) {
 		/*
 		 * Don't use dev_dbg here as dev may not be valid if channel
@@ -368,23 +412,21 @@ static void wdsp_glink_notify_state(void *handle, const void *priv,
 		 */
 		pr_debug("%s: channel: %s disconnected locally\n",
 			 __func__, ch->ch_cfg.name);
-		mutex_unlock(&ch->mutex);
-
-		if (ch->free_mem) {
-			kfree(ch);
-			ch = NULL;
-		}
+		ch->ch_close_state = ch->ch_close_state | GLINK_LOCAL_DISCONNECTED;
+		wake_up(&ch->ch_free_wait);
 	} else if (event == GLINK_REMOTE_DISCONNECTED) {
 		dev_dbg(wpriv->dev, "%s: remote channel: %s disconnected remotely\n",
 			 __func__, ch->ch_cfg.name);
-		mutex_unlock(&ch->mutex);
 		/*
 		 * If remote disconnect happens, local side also has
 		 * to close the channel as per glink design in a
 		 * separate work_queue.
 		 */
 		queue_work(wpriv->work_queue, &ch->lcl_ch_cls_wrk);
+		ch->ch_close_state = ch->ch_close_state | GLINK_REMOTE_DISCONNECTED;
+		wake_up(&ch->ch_free_wait);
 	}
+	mutex_unlock(&ch->mutex);
 }
 
 /*
@@ -570,7 +612,7 @@ static int wdsp_glink_ch_info_init(struct wdsp_glink_priv *wpriv,
 
 	mutex_lock(&wpriv->glink_mutex);
 	if (wpriv->ch) {
-		dev_err(wpriv->dev, "%s: glink ch memory is already allocated\n",
+		dev_err_ratelimited(wpriv->dev, "%s: glink ch memory is already allocated\n",
 			 __func__);
 		ret = -EINVAL;
 		goto done;
@@ -579,7 +621,7 @@ static int wdsp_glink_ch_info_init(struct wdsp_glink_priv *wpriv,
 	no_of_channels = pkt->no_of_channels;
 
 	if (no_of_channels > WDSP_MAX_NO_OF_CHANNELS) {
-		dev_err(wpriv->dev, "%s: no_of_channels: %d but max allowed are %d\n",
+		dev_err_ratelimited(wpriv->dev, "%s: no_of_channels: %d but max allowed are %d\n",
 			__func__, no_of_channels, WDSP_MAX_NO_OF_CHANNELS);
 		ret = -EINVAL;
 		goto done;
@@ -598,20 +640,20 @@ static int wdsp_glink_ch_info_init(struct wdsp_glink_priv *wpriv,
 
 		size += WDSP_CH_CFG_SIZE;
 		if (size > pkt_size) {
-			dev_err(wpriv->dev, "%s: Invalid size = %zd, pkt_size = %zd\n",
+			dev_err_ratelimited(wpriv->dev, "%s: Invalid size = %zd, pkt_size = %zd\n",
 				__func__, size, pkt_size);
 			ret = -EINVAL;
 			goto err_ch_mem;
 		}
 		if (ch_cfg->no_of_intents > WDSP_MAX_NO_OF_INTENTS) {
-			dev_err(wpriv->dev, "%s: Invalid no_of_intents = %d\n",
+			dev_err_ratelimited(wpriv->dev, "%s: Invalid no_of_intents = %d\n",
 				__func__, ch_cfg->no_of_intents);
 			ret = -EINVAL;
 			goto err_ch_mem;
 		}
 		size += (sizeof(u32) * ch_cfg->no_of_intents);
 		if (size > pkt_size) {
-			dev_err(wpriv->dev, "%s: Invalid size = %zd, pkt_size = %zd\n",
+			dev_err_ratelimited(wpriv->dev, "%s: Invalid size = %zd, pkt_size = %zd\n",
 				__func__, size, pkt_size);
 			ret = -EINVAL;
 			goto err_ch_mem;
@@ -631,14 +673,33 @@ static int wdsp_glink_ch_info_init(struct wdsp_glink_priv *wpriv,
 			goto err_ch_mem;
 		}
 		ch[i]->channel_state = GLINK_LOCAL_DISCONNECTED;
+		ch[i]->ch_close_state = (GLINK_LOCAL_DISCONNECTED |
+					GLINK_REMOTE_DISCONNECTED);
 		memcpy(&ch[i]->ch_cfg, payload, ch_cfg_size);
 		payload += ch_cfg_size;
 
+		/* check ch name is valid string or not */
+		for (j = 0; j < WDSP_CH_NAME_MAX_LEN; j++) {
+			if (ch[i]->ch_cfg.name[j] == '\0')
+				break;
+		}
+
+		if (j == WDSP_CH_NAME_MAX_LEN) {
+			dev_err_ratelimited(wpriv->dev, "%s: Wrong channel name\n",
+				__func__);
+			kfree(ch[i]);
+			ch[i] = NULL;
+			ret = -EINVAL;
+			goto err_ch_mem;
+		}
+
 		mutex_init(&ch[i]->mutex);
 		ch[i]->wpriv = wpriv;
+
 		INIT_WORK(&ch[i]->lcl_ch_open_wrk, wdsp_glink_lcl_ch_open_wrk);
 		INIT_WORK(&ch[i]->lcl_ch_cls_wrk, wdsp_glink_lcl_ch_cls_wrk);
 		init_waitqueue_head(&ch[i]->ch_connect_wait);
+		init_waitqueue_head(&ch[i]->ch_free_wait);
 	}
 
 	INIT_WORK(&wpriv->ch_open_cls_wrk, wdsp_glink_ch_open_cls_wrk);
@@ -737,6 +798,9 @@ static ssize_t wdsp_glink_read(struct file *file, char __user *buf,
 	int ret = 0, ret1 = 0;
 	struct wdsp_glink_rsp_que *rsp;
 	struct wdsp_glink_priv *wpriv;
+	struct ipc_pkt *ppkt = NULL;
+	struct detection_engine_event *pevt = NULL;
+	struct gcs_cal_header *ev_hdr = NULL;
 
 	wpriv = (struct wdsp_glink_priv *)file->private_data;
 	if (!wpriv) {
@@ -746,7 +810,7 @@ static ssize_t wdsp_glink_read(struct file *file, char __user *buf,
 	}
 
 	if (count > WDSP_MAX_READ_SIZE) {
-		dev_info(wpriv->dev, "%s: count = %zd is more than WDSP_MAX_READ_SIZE\n",
+		dev_info_ratelimited(wpriv->dev, "%s: count = %zd is more than WDSP_MAX_READ_SIZE\n",
 			__func__, count);
 		count = WDSP_MAX_READ_SIZE;
 	}
@@ -775,10 +839,20 @@ static ssize_t wdsp_glink_read(struct file *file, char __user *buf,
 			/* Return the number of bytes copied */
 			ret = rsp->buf_size;
 		}
+		ppkt = (struct ipc_pkt *)buf;
+		if (ppkt != NULL && ppkt->hdr.opcode == GRAPHITE_EVENT) {
+			ev_hdr = (struct gcs_cal_header *) ppkt->payload;
+			pevt = (struct detection_engine_event *)
+				((uint8_t *)ev_hdr +
+				sizeof(struct gcs_cal_header));
+
+			dev_info(wpriv->dev, "%s: svt_mode %d\n",
+				__func__, pevt->ctrl_svt_mode);
+		}
 
 		if (ret1) {
 			mutex_unlock(&wpriv->rsp_mutex);
-			dev_err(wpriv->dev, "%s: copy_to_user failed %d\n",
+			dev_err_ratelimited(wpriv->dev, "%s: copy_to_user failed %d\n",
 				__func__, ret);
 			ret = -EFAULT;
 			goto done;
@@ -824,7 +898,7 @@ static ssize_t wdsp_glink_write(struct file *file, const char __user *buf,
 
 	if ((count < WDSP_WRITE_PKT_SIZE) ||
 	    (count > WDSP_MAX_WRITE_SIZE)) {
-		dev_err(wpriv->dev, "%s: Invalid count = %zd\n",
+		dev_err_ratelimited(wpriv->dev, "%s: Invalid count = %zd\n",
 			__func__, count);
 		ret = -EINVAL;
 		goto done;
@@ -841,7 +915,7 @@ static ssize_t wdsp_glink_write(struct file *file, const char __user *buf,
 
 	ret = copy_from_user(tx_buf->buf, buf, count);
 	if (ret) {
-		dev_err(wpriv->dev, "%s: copy_from_user failed %d\n",
+		dev_err_ratelimited(wpriv->dev, "%s: copy_from_user failed %d\n",
 			__func__, ret);
 		ret = -EFAULT;
 		goto free_buf;
@@ -852,7 +926,7 @@ static ssize_t wdsp_glink_write(struct file *file, const char __user *buf,
 	case WDSP_REG_PKT:
 		if (count < (WDSP_WRITE_PKT_SIZE + WDSP_REG_PKT_SIZE +
 			     WDSP_CH_CFG_SIZE)) {
-			dev_err(wpriv->dev, "%s: Invalid reg pkt size = %zd\n",
+			dev_err_ratelimited(wpriv->dev, "%s: Invalid reg pkt size = %zd\n",
 				__func__, count);
 			ret = -EINVAL;
 			goto free_buf;
@@ -861,7 +935,7 @@ static ssize_t wdsp_glink_write(struct file *file, const char __user *buf,
 					(struct wdsp_reg_pkt *)wpkt->payload,
 					count);
 		if (IS_ERR_VALUE(ret))
-			dev_err(wpriv->dev, "%s: glink register failed, ret = %d\n",
+			dev_err_ratelimited(wpriv->dev, "%s: glink register failed, ret = %d\n",
 				__func__, ret);
 		vfree(tx_buf);
 		break;
@@ -871,7 +945,7 @@ static ssize_t wdsp_glink_write(struct file *file, const char __user *buf,
 							GLINK_LINK_STATE_UP),
 					 msecs_to_jiffies(TIMEOUT_MS));
 		if (!ret) {
-			dev_err(wpriv->dev, "%s: Link state wait timeout\n",
+			dev_err_ratelimited(wpriv->dev, "%s: Link state wait timeout\n",
 				__func__);
 			ret = -ETIMEDOUT;
 			goto free_buf;
@@ -881,7 +955,7 @@ static ssize_t wdsp_glink_write(struct file *file, const char __user *buf,
 		break;
 	case WDSP_CMD_PKT:
 		if (count <= (WDSP_WRITE_PKT_SIZE + WDSP_CMD_PKT_SIZE)) {
-			dev_err(wpriv->dev, "%s: Invalid cmd pkt size = %zd\n",
+			dev_err_ratelimited(wpriv->dev, "%s: Invalid cmd pkt size = %zd\n",
 				__func__, count);
 			ret = -EINVAL;
 			goto free_buf;
@@ -889,7 +963,7 @@ static ssize_t wdsp_glink_write(struct file *file, const char __user *buf,
 		mutex_lock(&wpriv->glink_mutex);
 		if (wpriv->glink_state.link_state == GLINK_LINK_STATE_DOWN) {
 			mutex_unlock(&wpriv->glink_mutex);
-			dev_err(wpriv->dev, "%s: Link state is Down\n",
+			dev_err_ratelimited(wpriv->dev, "%s: Link state is Down\n",
 				__func__);
 
 			ret = -ENETRESET;
@@ -901,13 +975,11 @@ static ssize_t wdsp_glink_write(struct file *file, const char __user *buf,
 					sizeof(struct wdsp_cmd_pkt) +
 					cpkt->payload_size;
 		if (count < pkt_max_size) {
-			dev_err(wpriv->dev, "%s: Invalid cmd pkt count = %zd, pkt_size = %zd\n",
+			dev_err_ratelimited(wpriv->dev, "%s: Invalid cmd pkt count = %zd, pkt_size = %zd\n",
 				__func__, count, pkt_max_size);
 			ret = -EINVAL;
 			goto free_buf;
 		}
-		dev_dbg(wpriv->dev, "%s: requested ch_name: %s, pkt_size: %zd\n",
-			__func__, cpkt->ch_name, pkt_max_size);
 		for (i = 0; i < wpriv->no_of_channels; i++) {
 			if (wpriv->ch && wpriv->ch[i] &&
 				(!strcmp(cpkt->ch_name,
@@ -917,18 +989,20 @@ static ssize_t wdsp_glink_write(struct file *file, const char __user *buf,
 			}
 		}
 		if (!tx_buf->ch) {
-			dev_err(wpriv->dev, "%s: Failed to get glink channel\n",
+			dev_err_ratelimited(wpriv->dev, "%s: Failed to get glink channel\n",
 				__func__);
 			ret = -EINVAL;
 			goto free_buf;
 		}
+		dev_dbg(wpriv->dev, "%s: requested ch_name: %s, pkt_size: %zd\n",
+			__func__, cpkt->ch_name, pkt_max_size);
 
 		ret = wait_event_timeout(tx_buf->ch->ch_connect_wait,
 					 (tx_buf->ch->channel_state ==
 							GLINK_CONNECTED),
 					 msecs_to_jiffies(TIMEOUT_MS));
 		if (!ret) {
-			dev_err(wpriv->dev, "%s: glink channel %s is not in connected state %d\n",
+			dev_err_ratelimited(wpriv->dev, "%s: glink channel %s is not in connected state %d\n",
 				__func__, tx_buf->ch->ch_cfg.name,
 				tx_buf->ch->channel_state);
 			ret = -ETIMEDOUT;
@@ -940,7 +1014,8 @@ static ssize_t wdsp_glink_write(struct file *file, const char __user *buf,
 		queue_work(wpriv->work_queue, &tx_buf->tx_work);
 		break;
 	default:
-		dev_err(wpriv->dev, "%s: Invalid packet type\n", __func__);
+		dev_err_ratelimited(wpriv->dev, "%s: Invalid packet type\n",
+				    __func__);
 		ret = -EINVAL;
 		vfree(tx_buf);
 		break;
@@ -986,6 +1061,7 @@ static int wdsp_glink_open(struct inode *inode, struct file *file)
 		goto err_wq;
 	}
 
+	wpriv->glink_state.link_state = GLINK_LINK_STATE_DOWN;
 	init_completion(&wpriv->rsp_complete);
 	init_waitqueue_head(&wpriv->link_state_wait);
 	mutex_init(&wpriv->rsp_mutex);
@@ -1045,34 +1121,38 @@ static int wdsp_glink_release(struct inode *inode, struct file *file)
 
 	if (wpriv->glink_state.handle)
 		glink_unregister_link_state_cb(wpriv->glink_state.handle);
+	/*
+	 * Wait for channel local and remote disconnect state notifications
+	 * before freeing channel memory.
+	 */
+	for (i = 0; i < wpriv->no_of_channels; i++) {
+		if (wpriv->ch && wpriv->ch[i]) {
+			ret = wait_event_timeout(wpriv->ch[i]->ch_free_wait,
+					(wpriv->ch[i]->ch_close_state ==
+					(GLINK_LOCAL_DISCONNECTED | GLINK_REMOTE_DISCONNECTED)),
+					msecs_to_jiffies(TIMEOUT_MS));
+			if (!ret) {
+				pr_err("%s: glink channel %s is failed to notify states properly %d\n",
+					__func__, wpriv->ch[i]->ch_cfg.name,
+					wpriv->ch[i]->ch_close_state);
+				ret = -EINVAL;
+				goto done;
+			}
+		}
+	}
 
 	flush_workqueue(wpriv->work_queue);
 	destroy_workqueue(wpriv->work_queue);
+	wpriv->work_queue = NULL;
 
-	/*
-	 * Clean up glink channel memory in channel state
-	 * callback only if close channels are called from here.
-	 */
-	if (wpriv->ch) {
-		for (i = 0; i < wpriv->no_of_channels; i++) {
-			if (wpriv->ch[i]) {
-				wpriv->ch[i]->free_mem = true;
-				/*
-				 * Channel handle NULL means channel is already
-				 * closed. Free the channel memory here itself.
-				 */
-				if (!wpriv->ch[i]->handle) {
-					kfree(wpriv->ch[i]);
-					wpriv->ch[i] = NULL;
-				} else {
-					wdsp_glink_close_ch(wpriv->ch[i]);
-				}
-			}
+	for (i = 0; i < wpriv->no_of_channels; i++) {
+		if (wpriv->ch && wpriv->ch[i]) {
+			kfree(wpriv->ch[i]);
+			wpriv->ch[i] = NULL;
 		}
-
-		kfree(wpriv->ch);
-		wpriv->ch = NULL;
 	}
+	kfree(wpriv->ch);
+	wpriv->ch = NULL;
 
 	mutex_destroy(&wpriv->glink_mutex);
 	mutex_destroy(&wpriv->rsp_mutex);

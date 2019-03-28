@@ -45,6 +45,9 @@
 #include <asm/mmu_context.h>
 
 #include "mm.h"
+#ifdef CONFIG_RELOCATABLE_KERNEL
+#include <soc/qcom/secure_buffer.h> 
+#endif
 
 u64 idmap_t0sz = TCR_T0SZ(VA_BITS);
 
@@ -58,9 +61,15 @@ EXPORT_SYMBOL(kimage_voffset);
 unsigned long empty_zero_page[PAGE_SIZE / sizeof(unsigned long)] __page_aligned_bss;
 EXPORT_SYMBOL(empty_zero_page);
 
+#ifdef CONFIG_TIMA_RKP
+extern pte_t bm_pte[];
+extern pmd_t bm_pmd[];
+extern pud_t bm_pud[];
+#else
 static pte_t bm_pte[PTRS_PER_PTE] __page_aligned_bss;
 static pmd_t bm_pmd[PTRS_PER_PMD] __page_aligned_bss __maybe_unused;
 static pud_t bm_pud[PTRS_PER_PUD] __page_aligned_bss __maybe_unused;
+#endif
 
 static bool dma_overlap(phys_addr_t start, phys_addr_t end);
 
@@ -119,13 +128,115 @@ static void split_pmd(pmd_t *pmd, pte_t *pte)
 	} while (pte++, i++, i < PTRS_PER_PTE);
 }
 
+#ifdef CONFIG_TIMA_RKP
+spinlock_t ro_rkp_pages_lock = __SPIN_LOCK_UNLOCKED();
+char ro_pages_stat[RO_PAGES] = {0};
+unsigned ro_alloc_last = 0;
+int rkp_ro_mapped = 0;
+int ro_buf_done = 0;
+void* rkp_ro_alloc()
+{
+	unsigned long flags;
+	int i, j;
+	void * alloc_addr = NULL;
+	if (!ro_buf_done)
+		return alloc_addr;
+
+	spin_lock_irqsave(&ro_rkp_pages_lock,flags);
+        for (i = 0, j = ro_alloc_last; i < (RO_PAGES) ; i++) {
+		j =  (j+1) %(RO_PAGES);
+		if (!ro_pages_stat[j]) {
+			ro_pages_stat[j] = 1;
+			ro_alloc_last = j+1;
+			alloc_addr = (void*) ((u64)RKP_RBUF_VA +  (j << PAGE_SHIFT));
+			break;
+		}
+	}
+	spin_unlock_irqrestore(&ro_rkp_pages_lock,flags);
+	return alloc_addr;
+}
+
+void rkp_ro_free(void *free_addr)
+{
+	int i;
+	unsigned long flags;
+	i =  ((u64)free_addr - (u64)RKP_RBUF_VA) >> PAGE_SHIFT;
+	spin_lock_irqsave(&ro_rkp_pages_lock,flags);
+	ro_pages_stat[i] = 0;
+	ro_alloc_last = i;
+	spin_unlock_irqrestore(&ro_rkp_pages_lock,flags);
+}
+
+unsigned int is_rkp_ro_page(u64 addr)
+{
+	if( (addr >= (u64)RKP_RBUF_VA)
+		&& (addr < (u64)(RKP_RBUF_VA+ TIMA_ROBUF_SIZE)))
+		return 1;
+	else return 0;
+}
+
+/* we suppose the whole block remap to page table should start with block borders */
+static inline void __init block_to_pages(pmd_t *pmd, unsigned long addr,
+                                  unsigned long end, unsigned long pfn)
+{
+	pte_t *old_pte;
+	pmd_t new ;
+	pte_t *pte = NULL;
+	int i = 0;
+	pte = rkp_ro_alloc();
+	if (!pte)
+		pte = (pte_t *)early_pgtable_alloc();
+
+	// addr could start from middle of this pmd so split first
+	split_pmd(pmd, pte);
+
+	old_pte = pte;
+	__pmd_populate(&new, __pa(pte), PMD_TYPE_TABLE); /* populate to temporary pmd */
+	pte = pte_offset_kernel(&new, addr);
+	do {
+		set_pte(pte, pfn_pte(pfn, PAGE_KERNEL_EXEC));
+		pfn++;
+	} while (pte++, i++, i < PTRS_PER_PTE);
+	__pmd_populate(pmd, __pa(old_pte), PMD_TYPE_TABLE);
+	flush_tlb_all();
+}
+#endif
+
+#ifdef CONFIG_RELOCATABLE_KERNEL
+#define VMID_HLOS	0x3
+#define VMID_HYP	0x4 
+#define PERM_READ	0x4
+#define PERM_WRITE	0x2
+
+int rkp_assign_mem_to_hyp(phys_addr_t addr, size_t size) 
+{ 
+	int ret; 
+	int srcVM[1] = {VMID_HLOS}; 
+	int destVM[1] = {VMID_HYP};	// 4 
+	int destVMperm[1] = {PERM_READ | PERM_WRITE}; 
+	
+	ret = hyp_assign_phys(addr, size, srcVM, 1, destVM, destVMperm, 1); 
+	if (ret) {
+		printk("RKP %s: failed for %pa address of size %zx - rc:%d\n", 
+			__func__, &addr, size, ret);
+	} else {
+		printk("RKP successfully assigned memory to hyp\n");
+	}
+	return ret; 
+}
+#endif 
+
 static void alloc_init_pte(pmd_t *pmd, unsigned long addr,
 				  unsigned long end, unsigned long pfn,
 				  pgprot_t prot,
 				  phys_addr_t (*pgtable_alloc)(void))
 {
 	pte_t *pte;
-
+#ifdef CONFIG_TIMA_RKP
+	if(pmd_block(*pmd)) {
+		return block_to_pages(pmd, addr, end, pfn);
+	}
+#endif
 	if (pmd_none(*pmd) || pmd_sect(*pmd)) {
 		phys_addr_t pte_phys;
 		BUG_ON(!pgtable_alloc);
@@ -193,7 +304,13 @@ static void alloc_init_pmd(pud_t *pud, unsigned long addr, unsigned long end,
 	if (pud_none(*pud) || pud_sect(*pud)) {
 		phys_addr_t pmd_phys;
 		BUG_ON(!pgtable_alloc);
+#ifdef CONFIG_TIMA_RKP
+		pmd_phys = (phys_addr_t )rkp_ro_alloc();
+		if (!pmd_phys)
+			pmd_phys = pgtable_alloc();
+#else
 		pmd_phys = pgtable_alloc();
+#endif
 		pmd = pmd_set_fixmap(pmd_phys);
 		if (pud_sect(*pud)) {
 			/*
@@ -248,6 +365,10 @@ static inline bool use_1G_block(unsigned long addr, unsigned long next,
 	if (((addr | next | phys) & ~PUD_MASK) != 0)
 		return false;
 
+	if ((IS_ENABLED(CONFIG_TIMA_RKP)) && 
+		((addr <= (u64)_stext) && ((u64)_stext <= next)))
+			return false;
+
 	return true;
 }
 
@@ -291,7 +412,12 @@ static void alloc_init_pud(pgd_t *pgd, unsigned long addr, unsigned long end,
 				if (pud_table(old_pud)) {
 					phys_addr_t table = pud_page_paddr(old_pud);
 					if (!WARN_ON_ONCE(slab_is_available()))
+#ifdef CONFIG_TIMA_RKP
+						if ((u64) table < (u64) __pa(_text) || (u64) table > (u64) __pa(_etext))
+							memblock_free(table, PAGE_SIZE);
+#else
 						memblock_free(table, PAGE_SIZE);
+#endif
 				}
 			}
 		} else {
@@ -444,6 +570,7 @@ static void __init map_mem(pgd_t *pgd)
 
 		if (start >= end)
 			break;
+
 		if (memblock_is_nomap(reg))
 			continue;
 
@@ -505,8 +632,12 @@ static void __init map_kernel(pgd_t *pgd)
 {
 	static struct vm_struct vmlinux_text, vmlinux_rodata, vmlinux_init, vmlinux_data;
 
-	map_kernel_segment(pgd, _text, _etext, PAGE_KERNEL_EXEC, &vmlinux_text);
-	map_kernel_segment(pgd, __start_rodata, __init_begin, PAGE_KERNEL, &vmlinux_rodata);
+#ifdef	CONFIG_RELOCATABLE_KERNEL
+	map_kernel_segment(pgd, (void *)(KIMAGE_VADDR+0x80000), __start_rodata, PAGE_KERNEL_EXEC, &vmlinux_text);
+#else
+	map_kernel_segment(pgd, _text, __start_rodata, PAGE_KERNEL_EXEC, &vmlinux_text);
+#endif
+	map_kernel_segment(pgd, __start_rodata, _etext, PAGE_KERNEL, &vmlinux_rodata);
 	map_kernel_segment(pgd, __init_begin, __init_end, PAGE_KERNEL_EXEC,
 			   &vmlinux_init);
 	map_kernel_segment(pgd, _data, _end, PAGE_KERNEL, &vmlinux_data);
@@ -599,9 +730,13 @@ void __init paging_init(void)
 	 * We only reuse the PGD from the swapper_pg_dir, not the pud + pmd
 	 * allocated with it.
 	 */
+#ifdef CONFIG_TIMA_RKP
+	memset(RKP_RBUF_VA, 0, TIMA_ROBUF_SIZE);
+	ro_buf_done = 1;
+#else
 	memblock_free(__pa(swapper_pg_dir) + PAGE_SIZE,
 		      SWAPPER_DIR_SIZE - PAGE_SIZE);
-
+#endif
 	bootmem_init();
 }
 

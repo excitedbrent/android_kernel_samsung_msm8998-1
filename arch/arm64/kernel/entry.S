@@ -35,6 +35,10 @@
 #include <asm/asm-uaccess.h>
 #include <asm/unistd.h>
 
+#ifdef CONFIG_RKP_CFP
+#include <asm/rkp_cfp.h>
+#endif
+
 /*
  * Context tracking subsystem.  Used to instrument transitions
  * between user and kernel mode.
@@ -83,6 +87,13 @@
 	stp	x10, x11, [sp, #16 * 5]
 	stp	x12, x13, [sp, #16 * 6]
 	stp	x14, x15, [sp, #16 * 7]
+#ifdef CONFIG_RKP_CFP_ROPP
+#ifndef CONFIG_RKP_CFP_TEST
+	.if	\el == 1
+	mov	RRK, xzr
+	.endif
+#endif
+#endif
 	stp	x16, x17, [sp, #16 * 8]
 	stp	x18, x19, [sp, #16 * 9]
 	stp	x20, x21, [sp, #16 * 10]
@@ -96,19 +107,19 @@
 	mov	tsk, sp
 	and	tsk, tsk, #~(THREAD_SIZE - 1)	// Ensure MDSCR_EL1.SS is clear,
 	ldr	x19, [tsk, #TI_FLAGS]		// since we can unmask debug
+#ifdef CONFIG_RKP_CFP_ROPP
+	ropp_new_key	tsk
+#endif
 	disable_step_tsk x19, x20		// exceptions when scheduling.
 
 	mov	x29, xzr			// fp pointed to user-space
 	.else
+#ifdef CONFIG_RKP_CFP_ROPP
+	get_thread_info	tsk			//handle the case of using irq_stack
+	ropp_load_key 	tsk
+#endif
 	add	x21, sp, #S_FRAME_SIZE
-	get_thread_info tsk
-	/* Save the task's original addr_limit and set USER_DS (TASK_SIZE_64) */
-	ldr	x20, [tsk, #TI_ADDR_LIMIT]
-	str	x20, [sp, #S_ORIG_ADDR_LIMIT]
-	mov	x20, #TASK_SIZE_64
-	str	x20, [tsk, #TI_ADDR_LIMIT]
-	ALTERNATIVE(nop, SET_PSTATE_UAO(0), ARM64_HAS_UAO, CONFIG_ARM64_UAO)
-	.endif /* \el == 0 */
+	.endif
 	mrs	x22, elr_el1
 	mrs	x23, spsr_el1
 	stp	lr, x21, [sp, #S_LR]
@@ -165,14 +176,6 @@ alternative_else_nop_endif
 	.endm
 
 	.macro	kernel_exit, el
-	.if	\el != 0
-	/* Restore the task's original addr_limit. */
-	ldr	x20, [sp, #S_ORIG_ADDR_LIMIT]
-	str	x20, [tsk, #TI_ADDR_LIMIT]
-
-	/* No need to restore UAO, it will be restored from SPSR_EL1 */
-	.endif
-
 	ldp	x21, x22, [sp, #S_PC]		// load ELR, SPSR
 	.if	\el == 0
 	ct_user_enter
@@ -200,7 +203,7 @@ alternative_else_nop_endif
 	 * Cavium erratum 27456 (broadcast TLBI instructions may cause I-cache
 	 * corruption).
 	 */
-	post_ttbr0_update_workaround
+	bl	post_ttbr_update_workaround
 	.endif
 1:
 	.if	\el != 0
@@ -243,6 +246,13 @@ alternative_endif
 	ldp	x12, x13, [sp, #16 * 6]
 	ldp	x14, x15, [sp, #16 * 7]
 	ldp	x16, x17, [sp, #16 * 8]
+#ifdef CONFIG_RKP_CFP_ROPP
+	.if	\el == 1
+	/* Might be having an interrupt right after smc call, before any RRK loading code */
+	get_thread_info	x19
+	ropp_load_key 	x19 
+	.endif
+#endif
 	ldp	x18, x19, [sp, #16 * 9]
 	ldp	x20, x21, [sp, #16 * 10]
 	ldp	x22, x23, [sp, #16 * 11]
@@ -321,7 +331,11 @@ tsk	.req	x28		// current thread_info
 	.pushsection ".entry.text", "ax"
 
 	.align	11
+#ifdef CONFIG_RKP_CFP_JOPP
+VECTOR_ENTRY(vectors)
+#else
 ENTRY(vectors)
+#endif
 	ventry	el1_sync_invalid		// Synchronous EL1t
 	ventry	el1_irq_invalid			// IRQ EL1t
 	ventry	el1_fiq_invalid			// FIQ EL1t
@@ -539,7 +553,7 @@ el0_sync:
 	cmp	x24, #ESR_ELx_EC_FP_EXC64	// FP/ASIMD exception
 	b.eq	el0_fpsimd_exc
 	cmp	x24, #ESR_ELx_EC_SYS64		// configurable trap
-	b.eq	el0_undef
+	b.eq	el0_sys
 	cmp	x24, #ESR_ELx_EC_SP_ALIGN	// stack alignment exception
 	b.eq	el0_sp_pc
 	cmp	x24, #ESR_ELx_EC_PC_ALIGN	// pc alignment exception
@@ -616,13 +630,15 @@ el0_ia:
 	 * Instruction abort handling
 	 */
 	mrs	x26, far_el1
-	// enable interrupts before calling the main handler
-	enable_dbg_and_irq
+	enable_dbg
+#ifdef CONFIG_TRACE_IRQFLAGS
+	bl	trace_hardirqs_off
+#endif
 	ct_user_exit
 	mov	x0, x26
 	mov	x1, x25
 	mov	x2, sp
-	bl	do_mem_abort
+	bl	do_el0_ia_bp_hardening
 	b	ret_to_user
 el0_fpsimd_acc:
 	/*
@@ -677,6 +693,16 @@ el0_undef:
 	ct_user_exit
 	mov	x0, sp
 	bl	do_undefinstr
+	b	ret_to_user
+el0_sys:
+	/*
+	 * System instructions, for trapped cache maintenance instructions
+	 */
+	enable_dbg_and_irq
+	ct_user_exit
+	mov	x0, x25
+	mov	x1, sp
+	bl	do_sysinstr
 	b	ret_to_user
 el0_dbg:
 	/*
@@ -775,6 +801,9 @@ ENTRY(cpu_switch_to)
 	mov	sp, x9
 	and	x9, x9, #~(THREAD_SIZE - 1)
 	msr	sp_el0, x9
+#ifdef CONFIG_RKP_CFP_ROPP
+	ropp_load_key	x9 //must be after sp updated
+#endif
 	ret
 ENDPROC(cpu_switch_to)
 
@@ -805,7 +834,16 @@ work_pending:
 	mov	x0, sp				// 'regs'
 	enable_irq				// enable interrupts for do_notify_resume()
 	bl	do_notify_resume
+#ifdef CONFIG_SEC_BITSCATTER
+	ldr	x2, =__bs_hook
+	ldr	x3, [x2]
+	tbz	x3, #1, 1f
+	ldr	x2, =__bitscatter
+	blr	x2
+1:	b	ret_to_user
+#else
 	b	ret_to_user
+#endif
 work_resched:
 #ifdef CONFIG_TRACE_IRQFLAGS
 	bl	trace_hardirqs_off		// the IRQs are off here, inform the tracing code

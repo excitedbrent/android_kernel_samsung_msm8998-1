@@ -144,20 +144,22 @@ static void msm_ssusb_qmp_enable_autonomous(struct msm_ssphy_qmp *phy,
 	unsigned int autonomous_mode_offset =
 			phy->phy_reg[USB3_PHY_AUTONOMOUS_MODE_CTRL];
 
-	dev_dbg(phy->phy.dev, "enabling QMP autonomous mode with cable %s\n",
+	dev_err(phy->phy.dev, "enabling QMP autonomous mode with cable %s\n",
 			get_cable_status_str(phy));
 
 	if (enable) {
 		msm_ssusb_qmp_clr_lfps_rxterm_int(phy);
+		val = readb_relaxed(phy->base + autonomous_mode_offset);
+		val |= ARCVR_DTCT_EN;
 		if (phy->phy.flags & DEVICE_IN_SS_MODE) {
-			val =
-			readb_relaxed(phy->base + autonomous_mode_offset);
-			val |= ARCVR_DTCT_EN;
 			val |= ALFPS_DTCT_EN;
 			val &= ~ARCVR_DTCT_EVENT_SEL;
-			writeb_relaxed(val, phy->base + autonomous_mode_offset);
+		} else {
+			val &= ~ALFPS_DTCT_EN;
+			val |= ARCVR_DTCT_EVENT_SEL;
 		}
 
+		writeb_relaxed(val, phy->base + autonomous_mode_offset);
 		/* clamp phy level shifter to perform autonomous detection */
 		writel_relaxed(0x1, phy->vls_clamp_reg);
 	} else {
@@ -198,10 +200,10 @@ static int msm_ssusb_qmp_ldo_enable(struct msm_ssphy_qmp *phy, int on)
 {
 	int min, rc = 0;
 
-	dev_dbg(phy->phy.dev, "reg (%s)\n", on ? "HPM" : "LPM");
+	dev_err(phy->phy.dev, "reg (%s)\n", on ? "HPM" : "LPM");
 
 	if (phy->power_enabled == on) {
-		dev_dbg(phy->phy.dev, "PHYs' regulators status %d\n",
+		dev_err(phy->phy.dev, "PHYs' regulators status %d\n",
 			phy->power_enabled);
 		return 0;
 	}
@@ -290,7 +292,7 @@ static int msm_ssphy_qmp_init(struct usb_phy *uphy)
 	unsigned init_timeout_usec = INIT_MAX_TIME_USEC;
 	const struct qmp_reg_val *reg = NULL;
 
-	dev_dbg(uphy->dev, "Initializing QMP phy\n");
+	dev_err(uphy->dev, "Initializing QMP phy\n");
 
 	if (phy->emulation)
 		return 0;
@@ -374,7 +376,7 @@ static int msm_ssphy_qmp_reset(struct usb_phy *uphy)
 					phy);
 	int ret;
 
-	dev_dbg(uphy->dev, "Resetting QMP phy\n");
+	dev_err(uphy->dev, "Resetting QMP phy\n");
 
 	/* Assert USB3 PHY reset */
 	ret = reset_control_assert(phy->phy_phy_reset);
@@ -389,7 +391,7 @@ static int msm_ssphy_qmp_reset(struct usb_phy *uphy)
 		dev_err(uphy->dev, "phy_reset assert failed\n");
 		goto deassert_phy_phy_reset;
 	}
-
+	
 	/* select usb3 phy mode */
 	if (phy->tcsr_usb3_dp_phymode)
 		writel_relaxed(0x0, phy->tcsr_usb3_dp_phymode);
@@ -460,12 +462,12 @@ static int msm_ssphy_qmp_set_suspend(struct usb_phy *uphy, int suspend)
 	struct msm_ssphy_qmp *phy = container_of(uphy, struct msm_ssphy_qmp,
 					phy);
 
-	dev_dbg(uphy->dev, "QMP PHY set_suspend for %s called with cable %s\n",
+	dev_err(uphy->dev, "QMP PHY set_suspend for %s called with cable %s\n",
 			(suspend ? "suspend" : "resume"),
 			get_cable_status_str(phy));
 
 	if (phy->in_suspend == suspend) {
-		dev_dbg(uphy->dev, "%s: USB PHY is already %s.\n",
+		dev_err(uphy->dev, "%s: USB PHY is already %s.\n",
 			__func__, (suspend ? "suspended" : "resumed"));
 		return 0;
 	}
@@ -490,7 +492,7 @@ static int msm_ssphy_qmp_set_suspend(struct usb_phy *uphy, int suspend)
 		phy->clk_enabled = false;
 		phy->in_suspend = true;
 		msm_ssphy_power_enable(phy, 0);
-		dev_dbg(uphy->dev, "QMP PHY is suspend\n");
+		dev_err(uphy->dev, "QMP PHY is suspend\n");
 	} else {
 		msm_ssphy_power_enable(phy, 1);
 		clk_prepare_enable(phy->pipe_clk);
@@ -514,7 +516,7 @@ static int msm_ssphy_qmp_set_suspend(struct usb_phy *uphy, int suspend)
 		wmb();
 
 		phy->in_suspend = false;
-		dev_dbg(uphy->dev, "QMP PHY is resumed\n");
+		dev_err(uphy->dev, "QMP PHY is resumed\n");
 	}
 
 	return 0;
@@ -526,9 +528,9 @@ static int msm_ssphy_qmp_notify_connect(struct usb_phy *uphy,
 	struct msm_ssphy_qmp *phy = container_of(uphy, struct msm_ssphy_qmp,
 					phy);
 
-	dev_dbg(uphy->dev, "QMP phy connect notification\n");
+	dev_err(uphy->dev, "QMP phy connect notification\n");
 	phy->cable_connected = true;
-	dev_dbg(uphy->dev, "cable_connected=%d\n", phy->cable_connected);
+	dev_err(uphy->dev, "cable_connected=%d\n", phy->cable_connected);
 	return 0;
 }
 
@@ -538,8 +540,8 @@ static int msm_ssphy_qmp_notify_disconnect(struct usb_phy *uphy,
 	struct msm_ssphy_qmp *phy = container_of(uphy, struct msm_ssphy_qmp,
 					phy);
 
-	dev_dbg(uphy->dev, "QMP phy disconnect notification\n");
-	dev_dbg(uphy->dev, " cable_connected=%d\n", phy->cable_connected);
+	dev_err(uphy->dev, "QMP phy disconnect notification\n");
+	dev_err(uphy->dev, " cable_connected=%d\n", phy->cable_connected);
 	phy->cable_connected = false;
 	return 0;
 }
@@ -590,14 +592,14 @@ static int msm_ssphy_qmp_probe(struct platform_device *pdev)
 	phy->phy_reset = devm_reset_control_get(dev, "phy_reset");
 	if (IS_ERR(phy->phy_reset)) {
 		ret = PTR_ERR(phy->phy_reset);
-		dev_dbg(dev, "failed to get phy_reset\n");
+		dev_err(dev, "failed to get phy_reset\n");
 		goto err;
 	}
 
 	phy->phy_phy_reset = devm_reset_control_get(dev, "phy_phy_reset");
 	if (IS_ERR(phy->phy_phy_reset)) {
 		ret = PTR_ERR(phy->phy_phy_reset);
-		dev_dbg(dev, "failed to get phy_phy_reset\n");
+		dev_err(dev, "failed to get phy_phy_reset\n");
 		goto err;
 	}
 

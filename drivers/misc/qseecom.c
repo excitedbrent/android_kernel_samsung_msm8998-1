@@ -51,6 +51,10 @@
 #include <linux/compat.h>
 #include "compat_qseecom.h"
 
+#ifdef CONFIG_SEC_DEBUG
+#include <linux/qcom/sec_debug.h>
+#endif
+
 #define QSEECOM_DEV			"qseecom"
 #define QSEOS_VERSION_14		0x14
 #define QSEEE_VERSION_00		0x400000
@@ -1806,7 +1810,7 @@ static int __qseecom_process_incomplete_cmd(struct qseecom_dev_handle *data,
 			ret = msm_ion_do_cache_op(qseecom.ion_clnt,
 					ptr_svc->ihandle,
 					ptr_svc->sb_virt, ptr_svc->sb_length,
-					ION_IOC_CLEAN_INV_CACHES);
+						ION_IOC_CLEAN_INV_CACHES);
 			if (ret) {
 				pr_err("cache operation failed %d\n", ret);
 				return ret;
@@ -2120,7 +2124,7 @@ static int __qseecom_reentrancy_process_incomplete_cmd(
 			ret = msm_ion_do_cache_op(qseecom.ion_clnt,
 					ptr_svc->ihandle,
 					ptr_svc->sb_virt, ptr_svc->sb_length,
-					ION_IOC_CLEAN_INV_CACHES);
+						ION_IOC_CLEAN_INV_CACHES);
 			if (ret) {
 				pr_err("cache operation failed %d\n", ret);
 				return ret;
@@ -2612,6 +2616,8 @@ static int qseecom_unload_app(struct qseecom_dev_handle *data,
 				if (!strcmp((void *)ptr_app->app_name,
 					(void *)data->client.app_name)) {
 					found_app = true;
+					if (ptr_app->app_blocked)
+						app_crash = false;
 					if (app_crash || ptr_app->ref_cnt == 1)
 						unload = true;
 					break;
@@ -2641,6 +2647,8 @@ static int qseecom_unload_app(struct qseecom_dev_handle *data,
 		/* Populate the structure for sending scm call to load image */
 		req.qsee_cmd_id = QSEOS_APP_SHUTDOWN_COMMAND;
 		req.app_id = data->client.app_id;
+		if (!memcmp(data->client.app_name, "tz_ccm", strlen("tz_ccm"))) 
+            pr_err("[!] will unload (%s) ta with id = %d\n", (char *)data->client.app_name, data->client.app_id); 
 
 		/* SCM_CALL to unload the app */
 		ret = qseecom_scm_call(SCM_SVC_TZSCHEDULER, 1, &req,
@@ -2984,6 +2992,7 @@ static int qseecom_send_service_cmd(struct qseecom_dev_handle *data,
 				ret = -EINVAL;
 				goto exit;
 			}
+
 			ret = 0;
 		}
 		break;
@@ -4528,7 +4537,7 @@ int qseecom_start_app(struct qseecom_handle **handle,
 		entry = kmalloc(sizeof(*entry), GFP_KERNEL);
 		if (!entry) {
 			pr_err("kmalloc for app entry failed\n");
-			ret =  -ENOMEM;
+			ret = -ENOMEM;
 			goto err;
 		}
 		entry->app_id = app_id;
@@ -4587,9 +4596,9 @@ int qseecom_start_app(struct qseecom_handle **handle,
 	return 0;
 
 err:
-	kfree(data);
-	kfree(*handle);
-	*handle = NULL;
+		kfree(data);
+		kfree(*handle);
+		*handle = NULL;
 	mutex_unlock(&app_access_lock);
 	return ret;
 }
@@ -6570,6 +6579,7 @@ static int __qseecom_qteec_issue_cmd(struct qseecom_dev_handle *data,
 	void *cmd_buf = NULL;
 	size_t cmd_len;
 	struct sglist_info *table = data->sglistinfo_ptr;
+
 	void *req_ptr = NULL;
 	void *resp_ptr = NULL;
 
@@ -8562,6 +8572,8 @@ static int qseecom_probe(struct platform_device *pdev)
 		qseecom.fde_key_size =
 			of_property_read_bool((&pdev->dev)->of_node,
 						"qcom,fde-key-size");
+		pr_info("fde_key_size=%d\n", qseecom.fde_key_size);
+
 		qseecom.no_clock_support =
 				of_property_read_bool((&pdev->dev)->of_node,
 						"qcom,no-clock-support");
@@ -8642,6 +8654,9 @@ static int qseecom_probe(struct platform_device *pdev)
 					cmd_buf = (void *)&req;
 					cmd_len = sizeof(struct
 						qsee_apps_region_info_ireq);
+#ifdef CONFIG_SEC_DEBUG
+					sec_debug_secure_app_addr_size(req.addr, req.size);
+#endif
 					pr_warn("secure app region addr=0x%x size=0x%x",
 							req.addr, req.size);
 				} else {
@@ -8653,6 +8668,9 @@ static int qseecom_probe(struct platform_device *pdev)
 					cmd_buf = (void *)&req_64bit;
 					cmd_len = sizeof(struct
 					qsee_apps_region_info_64bit_ireq);
+#ifdef CONFIG_SEC_DEBUG
+					sec_debug_secure_app_addr_size(req_64bit.addr, req_64bit.size);
+#endif
 					pr_warn("secure app region addr=0x%llx size=0x%x",
 						req_64bit.addr, req_64bit.size);
 				}
@@ -8748,6 +8766,7 @@ exit_unreg_chrdev_region:
 static int qseecom_remove(struct platform_device *pdev)
 {
 	struct qseecom_registered_kclient_list *kclient = NULL;
+	struct qseecom_registered_kclient_list *kclient_tmp = NULL;
 	unsigned long flags = 0;
 	int ret = 0;
 	int i;
@@ -8757,10 +8776,8 @@ static int qseecom_remove(struct platform_device *pdev)
 	atomic_set(&qseecom.qseecom_state, QSEECOM_STATE_NOT_READY);
 	spin_lock_irqsave(&qseecom.registered_kclient_list_lock, flags);
 
-	list_for_each_entry(kclient, &qseecom.registered_kclient_list_head,
-								list) {
-		if (!kclient)
-			goto exit_irqrestore;
+	list_for_each_entry_safe(kclient, kclient_tmp,
+		&qseecom.registered_kclient_list_head, list) {
 
 		/* Break the loop if client handle is NULL */
 		if (!kclient->handle)
@@ -8784,7 +8801,7 @@ exit_free_kc_handle:
 	kzfree(kclient->handle);
 exit_free_kclient:
 	kzfree(kclient);
-exit_irqrestore:
+
 	spin_unlock_irqrestore(&qseecom.registered_kclient_list_lock, flags);
 
 	if (qseecom.qseos_version > QSEEE_VERSION_00)

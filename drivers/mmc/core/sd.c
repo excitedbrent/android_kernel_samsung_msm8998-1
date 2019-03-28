@@ -1147,6 +1147,20 @@ static void mmc_sd_detect(struct mmc_host *host)
 	BUG_ON(!host);
 	BUG_ON(!host->card);
 
+#if defined(CONFIG_SEC_HYBRID_TRAY)
+	if (host->ops->get_cd && host->ops->get_cd(host) == 0) {
+		mmc_card_set_removed(host->card);
+		mmc_sd_remove(host);
+
+		mmc_claim_host(host);
+		mmc_detach_bus(host);
+		mmc_power_off(host);
+		mmc_release_host(host);
+		pr_err("%s: card(tray) is removed...\n", mmc_hostname(host));
+		return;
+	}
+#endif
+
 	/*
 	 * Try to acquire claim host. If failed to get the lock in 2 sec,
 	 * just return; This is to ensure that when this call is invoked
@@ -1237,7 +1251,10 @@ static int mmc_sd_suspend(struct mmc_host *host)
 	if (!err) {
 		pm_runtime_disable(&host->card->dev);
 		pm_runtime_set_suspended(&host->card->dev);
-	}
+	/* if suspend fails, force mmc_detect_change during resume */
+	} else if (mmc_bus_manual_resume(host))
+		host->ignore_bus_resume_flags = true;
+
 	MMC_TRACE(host, "%s: Exit err: %d\n", __func__, err);
 
 	return err;
@@ -1259,6 +1276,19 @@ static int _mmc_sd_resume(struct mmc_host *host)
 
 	mmc_claim_host(host);
 
+	if (host->caps_backup)
+		host->caps = host->caps_backup;
+	if (host->card->sdr104_blocked) {
+		mmc_host_set_sdr104(host);
+		host->card->sdr104_blocked = false;
+	}
+
+#if defined(CONFIG_SEC_HYBRID_TRAY)
+	if (host->ops->get_cd && host->ops->get_cd(host) == 0) {
+		printk(KERN_NOTICE "%s is no card...\n", mmc_hostname(host));
+		goto no_card;
+	}
+#endif
 	if (!mmc_card_suspended(host->card))
 		goto out;
 
@@ -1283,15 +1313,15 @@ static int _mmc_sd_resume(struct mmc_host *host)
 #else
 	err = mmc_sd_init_card(host, host->card->ocr, host->card);
 #endif
+#if defined(CONFIG_SEC_HYBRID_TRAY)
+no_card:
+#endif
 	if (err) {
 		pr_err("%s: %s: mmc_sd_init_card_failed (%d)\n",
 				mmc_hostname(host), __func__, err);
 		goto out;
 	}
-	mmc_card_clr_suspended(host->card);
 
-	if (host->card->sdr104_blocked)
-		goto out;
 	err = mmc_resume_clk_scaling(host);
 	if (err) {
 		pr_err("%s: %s: fail to resume clock scaling (%d)\n",
@@ -1300,6 +1330,7 @@ static int _mmc_sd_resume(struct mmc_host *host)
 	}
 
 out:
+	mmc_card_clr_suspended(host->card);
 	mmc_release_host(host);
 	return err;
 }
@@ -1361,6 +1392,12 @@ static int mmc_sd_runtime_resume(struct mmc_host *host)
 
 static int mmc_sd_reset(struct mmc_host *host)
 {
+	if (!host->sdr104_wa) {
+		if (!host->caps_backup)
+			host->caps_backup = host->caps;
+		if (host->caps & MMC_CAP_UHS_SDR104)
+			host->caps &= ~MMC_CAP_UHS_SDR104;
+	}
 	mmc_power_cycle(host, host->card->ocr);
 	return mmc_sd_init_card(host, host->card->ocr, host->card);
 }
@@ -1390,6 +1427,11 @@ int mmc_attach_sd(struct mmc_host *host)
 
 	BUG_ON(!host);
 	WARN_ON(!host->claimed);
+
+	if (host->caps_backup) {
+		host->caps = host->caps_backup;
+		host->caps_backup = 0;
+	}
 
 	err = mmc_send_app_op_cond(host, 0, &ocr);
 	if (err)

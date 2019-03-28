@@ -53,6 +53,7 @@ static int diag_dbgfs_finished;
 static int diag_dbgfs_dci_data_index;
 static int diag_dbgfs_dci_finished;
 
+static struct mutex diag_dci_dbgfs_mutex;
 static ssize_t diag_dbgfs_read_status(struct file *file, char __user *ubuf,
 				      size_t count, loff_t *ppos)
 {
@@ -129,6 +130,12 @@ static ssize_t diag_dbgfs_read_status(struct file *file, char __user *ubuf,
 				 driver->real_time_mode[i]);
 	}
 
+	ret += scnprintf(buf+ret, buf_size-ret, "\nDIAG Client Info\n");
+	for (i = 0; i < driver->num_clients; i++) {
+		ret += scnprintf(buf+ret, buf_size-ret,
+			"%d) %s PID=%d\n", i, driver->client_map[i].name, driver->client_map[i].pid);
+	}
+
 	ret = simple_read_from_buffer(ubuf, count, ppos, buf, ret);
 
 	kfree(buf);
@@ -158,7 +165,8 @@ static ssize_t diag_dbgfs_read_dcistats(struct file *file,
 
 	buf_size = ksize(buf);
 	bytes_remaining = buf_size;
-
+	
+	mutex_lock(&diag_dci_dbgfs_mutex);
 	if (diag_dbgfs_dci_data_index == 0) {
 		bytes_written =
 			scnprintf(buf, buf_size,
@@ -216,6 +224,7 @@ static ssize_t diag_dbgfs_read_dcistats(struct file *file,
 	}
 
 	diag_dbgfs_dci_data_index = (i >= DIAG_DCI_DEBUG_CNT) ? 0 : i + 1;
+	mutex_unlock(&diag_dci_dbgfs_mutex);
 	bytes_written = simple_read_from_buffer(ubuf, count, ppos, buf,
 								bytes_in_buf);
 	kfree(buf);
@@ -1186,6 +1195,7 @@ int diag_debugfs_init(void)
 		pr_warn("diag: could not allocate memory for dci debug info\n");
 
 	mutex_init(&dci_stat_mutex);
+	mutex_init(&diag_dci_dbgfs_mutex);
 	return 0;
 err:
 	kfree(dci_traffic);
@@ -1202,6 +1212,7 @@ void diag_debugfs_cleanup(void)
 
 	kfree(dci_traffic);
 	mutex_destroy(&dci_stat_mutex);
+	mutex_destroy(&diag_dci_dbgfs_mutex);
 }
 #else
 int diag_debugfs_init(void) { return 0; }

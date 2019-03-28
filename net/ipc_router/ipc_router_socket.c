@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2016, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2011-2016, 2018, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -30,6 +30,8 @@
 #include <linux/ipc_router.h>
 
 #include <net/sock.h>
+
+#include <soc/qcom/subsystem_restart.h>
 
 #include "ipc_router_private.h"
 #include "ipc_router_security.h"
@@ -138,7 +140,12 @@ static int msm_ipc_router_extract_msg(struct msghdr *m,
 	hdr = &(pkt->hdr);
 	if (addr && (hdr->type == IPC_ROUTER_CTRL_CMD_RESUME_TX)) {
 		temp = skb_peek(pkt->pkt_fragment_q);
+		if (!temp || !temp->data) {
+			IPC_RTR_ERR("%s: Invalid skb\n", __func__);
+			return -EINVAL;
+		}
 		ctl_msg = (union rr_control_msg *)(temp->data);
+		memset(addr, 0x0, sizeof(*addr));
 		addr->family = AF_MSM_IPC;
 		addr->address.addrtype = MSM_IPC_ADDR_ID;
 		addr->address.addr.port_addr.node_id = ctl_msg->cli.node_id;
@@ -147,6 +154,7 @@ static int msm_ipc_router_extract_msg(struct msghdr *m,
 		return offset;
 	}
 	if (addr && (hdr->type == IPC_ROUTER_CTRL_CMD_DATA)) {
+		memset(addr, 0x0, sizeof(*addr));
 		addr->family = AF_MSM_IPC;
 		addr->address.addrtype = MSM_IPC_ADDR_ID;
 		addr->address.addr.port_addr.node_id = hdr->src_node_id;
@@ -410,6 +418,7 @@ static int msm_ipc_router_ioctl(struct socket *sock,
 	unsigned int n;
 	size_t srv_info_sz = 0;
 	int ret;
+	struct msm_ipc_subsys_request subsys_req;
 
 	if (!sk)
 		return -EINVAL;
@@ -504,6 +513,27 @@ static int msm_ipc_router_ioctl(struct socket *sock,
 		ret = msm_ipc_config_sec_rules((void *)arg);
 		if (ret != -EPERM)
 			port_ptr->type = IRSC_PORT;
+		break;
+
+	case IPC_SUB_IOCTL_SUBSYS_GET_RESTART:
+		if (!check_permissions()) {
+			IPC_RTR_ERR("%s: %s Do not have permissions\n",
+				__func__, current->comm);
+			ret = -EPERM;
+			break;
+		}
+		ret = copy_from_user(&subsys_req, (void *)arg, sizeof(subsys_req));
+		if (ret) {
+			ret = -EFAULT;
+			break;
+		}
+
+		if (subsys_req.request_id == SUBSYS_RES_REQ)
+			subsys_force_stop((const char *)(subsys_req.name), true);
+		else if (subsys_req.request_id == SUBSYS_CR_REQ)
+			subsys_force_stop((const char *)(subsys_req.name), false);
+		else
+			ret = -EINVAL;
 		break;
 
 	default:

@@ -17,6 +17,9 @@
 #include <linux/device.h>
 #include "mdss_fb.h"
 #include "mdss_hdmi_edid.h"
+#ifdef CONFIG_SEC_DISPLAYPORT
+#include <linux/dp_logger.h>
+#endif
 
 #define DBC_START_OFFSET 4
 #define EDID_DTD_LEN 18
@@ -26,8 +29,13 @@
  */
 #define MAX_DATA_BLOCK_SIZE 31
 
+#ifndef CONFIG_SEC_DISPLAYPORT
 #define HDMI_VSDB_3D_EVF_DATA_OFFSET(vsd) \
 	(!((vsd)[8] & BIT(7)) ? 9 : (!((vsd)[8] & BIT(6)) ? 11 : 13))
+#else
+#define HDMI_VSDB_3D_EVF_DATA_OFFSET(vsd) \
+	(!((vsd)[8] & BIT(7)) ? (!((vsd)[8] & BIT(6)) ? 9 : 11) : (!((vsd)[8] & BIT(6)) ? 11 : 13))
+#endif
 
 /*
  * As per the CEA-861E spec, there can be a total of 10 short audio
@@ -153,18 +161,135 @@ struct hdmi_edid_ctrl {
 	struct hdmi_edid_sink_caps sink_caps;
 	struct hdmi_edid_override_data override_data;
 	struct hdmi_edid_hdr_data hdr_data;
+#if defined(CONFIG_SEC_DISPLAYPORT)
+	int audio_channel_info;
+#endif
 };
+
+#if defined(CONFIG_SEC_DISPLAYPORT)
+struct secdp_display_timing {
+	uint32_t index; /* Resolution priority */
+	uint32_t active_h;
+	uint32_t active_v;
+	uint32_t refresh_rate;
+	uint32_t interlaced;
+	bool dex_support; /* true if it's dex supported resolution */
+};
+
+/* Index of max resolution which supported by sink */
+static uint32_t g_max_res_index;
+
+/* Index of max resolution which supported by dex station */
+static uint32_t g_dex_max_res_index;
+
+static struct secdp_display_timing secdp_supported_resolution[] = {
+	{0, 640, 480, 60, 0, true},
+	{1, 720, 480, 60, 0, true},
+	{2, 720, 576, 50, 0, true},
+
+	{3, 1280, 720, 50, 0, true},
+	{4, 1280, 720, 60, 0, true},
+
+	{5, 1280, 800, 60, 0, true}, /* CTS 18bpp */
+	{6, 1280, 1024, 60, 0, true}, /* CTS 18bpp */
+
+	{7, 1600, 900, 60, 0, true},
+
+	{8, 1920, 1080, 24, 0, true},
+	{9, 1920, 1080, 25, 0, true},
+	{10, 1920, 1080, 30, 0, true},
+	{11, 1920, 1080, 50, 0, true},
+	{12, 1920, 1080, 60, 0, true},
+
+	{13, 1920, 1440, 60, 0, true}, /* CTS 400.3.3.1 */
+	{14, 2048, 1536, 60, 0, true}, /* CTS 18bpp */
+	{15, 2560, 1440, 60, 0, true},
+
+	{16, 3840, 2160, 24, 0},
+	{17, 3840, 2160, 25, 0},
+	{18, 3840, 2160, 30, 0},
+	{19, 3840, 2160, 50, 0},
+	{20, 3840, 2160, 60, 0},
+
+	{21, 4096, 2160, 24, 0},
+	{22, 4096, 2160, 25, 0},
+	{23, 4096, 2160, 30, 0},
+	{24, 4096, 2160, 50, 0},
+	{25, 4096, 2160, 60, 0},
+};
+
+bool secdp_check_dex_reconnect(void)
+{
+	pr_info("%s, %d %d\n", __func__, g_max_res_index, g_dex_max_res_index);
+	if (g_max_res_index == g_dex_max_res_index)
+		return false;
+
+	return true;
+}
+
+static void secdp_set_max_resolution(struct secdp_display_timing *timing)
+{
+	/* find max resolution which supported by sink */
+	if (g_max_res_index < timing->index)
+		g_max_res_index = timing->index;
+
+	/* find max resolution which supported by dex station*/
+	if (timing->dex_support && (g_dex_max_res_index < timing->index))
+		g_dex_max_res_index = timing->index;
+}
+
+extern bool secdp_check_dex_mode(void);
+
+static int secdp_check_supported_resolution(struct msm_hdmi_mode_timing_info *info)
+{
+	int i;
+	int res_cnt = ARRAY_SIZE(secdp_supported_resolution);
+	struct secdp_display_timing *support = secdp_supported_resolution;
+
+	for (i=0; i < res_cnt; i++) {
+		if (support[i].active_h == info->active_h &&
+			support[i].active_v == info->active_v &&
+			support[i].interlaced == info->interlaced) {
+
+			int diff = support[i].refresh_rate - (info->refresh_rate / 1000);
+			diff *= diff;
+			if (diff < 2) {
+				pr_info("diff is less than 2\n");
+				secdp_set_max_resolution(&support[i]);
+
+				if (secdp_check_dex_mode()) {
+					if (support[i].dex_support)
+						return 1;
+					else
+						return 0;
+				}
+
+				return 1;
+			}
+		}
+	}
+	return 0;
+}
+#endif
 
 static bool hdmi_edid_is_mode_supported(struct hdmi_edid_ctrl *edid_ctrl,
 		struct msm_hdmi_mode_timing_info *timing, u32 out_format)
 {
+#if defined(CONFIG_SEC_DISPLAYPORT)
+	u32 pclk = timing->pixel_freq;
+#else
 	u32 pclk = hdmi_tx_setup_tmds_clk_rate(timing->pixel_freq,
 		out_format, false);
+#endif
 
 	if (!timing->supported ||
 		pclk > edid_ctrl->init_data.max_pclk_khz)
 		return false;
 
+#if defined(CONFIG_SEC_DISPLAYPORT)
+	if (!secdp_check_supported_resolution(timing))
+		return false;
+#endif
 	return true;
 }
 
@@ -204,6 +329,9 @@ static int hdmi_edid_reset_parser(struct hdmi_edid_ctrl *edid_ctrl)
 		sizeof(edid_ctrl->spkr_alloc_data_block));
 	edid_ctrl->adb_size = 0;
 	edid_ctrl->sadb_size = 0;
+#ifdef CONFIG_SEC_DISPLAYPORT
+	edid_ctrl->basic_audio_supp = false;
+#endif
 
 	hdmi_edid_set_video_resolution(edid_ctrl, edid_ctrl->default_vic, true);
 
@@ -368,6 +496,11 @@ error:
 	return ret;
 }
 
+#ifdef CONFIG_SEC_DISPLAYPORT                                                                     
+/*int forced_resolution = HDMI_VFRMT_1920x1080p60_16_9 + 1;*/
+int forced_resolution;
+#endif
+
 static ssize_t hdmi_edid_sysfs_rda_modes(struct device *dev,
 	struct device_attribute *attr, char *buf)
 {
@@ -390,6 +523,15 @@ static ssize_t hdmi_edid_sysfs_rda_modes(struct device *dev,
 		edid_ctrl->sink_data.disp_mode_list[0].video_format =
 			edid_ctrl->override_data.vic;
 	}
+
+#ifdef CONFIG_SEC_DISPLAYPORT
+	if (forced_resolution) {
+		hdmi_reset_resv_timing_info();
+		hdmi_edid_set_video_resolution(edid_ctrl, forced_resolution - 1, true);
+		num_of_elements = edid_ctrl->sink_data.num_of_elements;
+		video_mode = edid_ctrl->sink_data.disp_mode_list;
+	}
+#endif 
 
 	buf[0] = 0;
 	if (num_of_elements) {
@@ -713,6 +855,7 @@ static ssize_t hdmi_edid_sysfs_rda_3d_modes(struct device *dev,
 		}
 	}
 
+	/*DEV_DBG("%s: '%s'\n", __func__, buf);*/
 	ret += scnprintf(buf + ret, PAGE_SIZE - ret, "\n");
 
 	return ret;
@@ -1154,7 +1297,7 @@ static void hdmi_edid_extract_extended_data_blocks(
 				(etag[2] & (BIT(3) | BIT(2))) >> 2;
 			edid_ctrl->ce_scan_info =
 				etag[2] & (BIT(1) | BIT(0));
-			DEV_DBG("%s: Scan Info (pt|it|ce): (%d|%d|%d)",
+			DEV_DBG("%s: Scan Info (pt|it|ce): (%d|%d|%d)\n",
 				__func__,
 				edid_ctrl->pt_scan_info,
 				edid_ctrl->it_scan_info,
@@ -1166,17 +1309,17 @@ static void hdmi_edid_extract_extended_data_blocks(
 			hdmi_edid_parse_hvdb(edid_ctrl, etag);
 			break;
 		case Y420_CAPABILITY_MAP_DATA_BLOCK:
-			DEV_DBG("%s found Y420CMDB byte 3 = 0x%x",
+			DEV_DBG("%s found Y420CMDB byte 3 = 0x%x\n",
 				__func__, etag[2]);
 			hdmi_edid_parse_Y420CMDB(edid_ctrl, etag);
 			break;
 		case Y420_VIDEO_DATA_BLOCK:
-			DEV_DBG("%s found Y420VDB byte 3 = 0x%x",
+			DEV_DBG("%s found Y420VDB byte 3 = 0x%x\n",
 				__func__, etag[2]);
 			hdmi_edid_parse_Y420VDB(edid_ctrl, etag);
 			break;
 		case HDR_STATIC_METADATA_DATA_BLOCK:
-			DEV_DBG("%s found HDR Static Metadata. Byte 3 = 0x%x",
+			DEV_DBG("%s found HDR Static Metadata. Byte 3 = 0x%x\n",
 				__func__, etag[2]);
 			hdmi_edid_parse_hdrdb(edid_ctrl, etag);
 			edid_ctrl->hdr_supported = true;
@@ -1228,12 +1371,24 @@ static void hdmi_edid_extract_audio_data_blocks(
 	u8 adb_max = 0;
 	const u8 *adb = NULL;
 	u32 offset = DBC_START_OFFSET;
+#if defined(CONFIG_SEC_DISPLAYPORT)
+	u16 audio_ch = 0;
+	u32 bit_rate = 0;
+	const u8 *adb_temp = NULL;
+	u8 len_temp = 0;
+#endif
 
 	if (!edid_ctrl) {
 		DEV_ERR("%s: invalid input\n", __func__);
 		return;
 	}
 
+#if defined(CONFIG_SEC_DISPLAYPORT)
+	if (in_buf[3] & (1<<6)) {
+		DEV_INFO("%s: default audio format\n", __func__);
+		edid_ctrl->audio_channel_info |= 2;
+	}
+#endif
 	edid_ctrl->adb_size = 0;
 
 	memset(edid_ctrl->audio_data_block, 0,
@@ -1258,6 +1413,25 @@ static void hdmi_edid_extract_audio_data_blocks(
 			continue;
 		}
 
+#if defined(CONFIG_SEC_DISPLAYPORT)
+		adb_temp = adb;
+		len_temp = len;
+		while(len > 0) {
+			if (adb[1]>>3 == 1) {
+				audio_ch |= (1 << (adb[1] & 0x7));
+				if((adb[1] & 0x7) > 0x04)
+					audio_ch |= 0x20;
+				if (adb[3] & 0x07) {
+					bit_rate = adb[3] & 0x7;
+					bit_rate |= (adb[2] & 0x7F) << 3;
+				}
+			}
+			len -= 3;
+			adb += 3;
+		}
+		adb = adb_temp;
+		len = len_temp;
+#endif
 		memcpy(edid_ctrl->audio_data_block + edid_ctrl->adb_size,
 			adb + 1, len);
 		offset = (adb - in_buf) + 1 + len;
@@ -1266,13 +1440,37 @@ static void hdmi_edid_extract_audio_data_blocks(
 		adb_max++;
 	} while (adb);
 
+#if defined(CONFIG_SEC_DISPLAYPORT)
+	edid_ctrl->audio_channel_info |= (bit_rate << 16);
+	edid_ctrl->audio_channel_info |= audio_ch;
+	pr_info("%s: Displayport Audio info : 0x%x\n", __func__,
+			edid_ctrl->audio_channel_info);
+#endif
+
 } /* hdmi_edid_extract_audio_data_blocks */
+
+#if defined(CONFIG_SEC_DISPLAYPORT)
+int get_audio_ch(void *input)
+{
+	struct hdmi_edid_ctrl *edid_ctrl = (struct hdmi_edid_ctrl *)input;
+	return edid_ctrl->audio_channel_info;
+}
+
+u32 secdp_get_max_pclk(void *input)
+{
+	struct hdmi_edid_ctrl *edid_ctrl = (struct hdmi_edid_ctrl *)input;
+	return edid_ctrl->init_data.max_pclk_khz;
+}
+#endif
 
 static void hdmi_edid_extract_speaker_allocation_data(
 	struct hdmi_edid_ctrl *edid_ctrl, const u8 *in_buf)
 {
 	u8 len;
 	const u8 *sadb = NULL;
+#ifdef CONFIG_SEC_DISPLAYPORT
+	u16 speaker_allocation = 0;
+#endif
 
 	if (!edid_ctrl) {
 		DEV_ERR("%s: invalid input\n", __func__);
@@ -1289,6 +1487,9 @@ static void hdmi_edid_extract_speaker_allocation_data(
 
 	memcpy(edid_ctrl->spkr_alloc_data_block, sadb + 1, len);
 	edid_ctrl->sadb_size = len;
+#ifdef CONFIG_SEC_DISPLAYPORT
+	speaker_allocation |= (sadb[1] & 0x7F);
+#endif
 
 	DEV_DBG("%s: EDID: speaker alloc data SP byte = %08x %s%s%s%s%s%s%s\n",
 		__func__, sadb[1],
@@ -1299,6 +1500,9 @@ static void hdmi_edid_extract_speaker_allocation_data(
 		(sadb[1] & BIT(4)) ? "RC," : "",
 		(sadb[1] & BIT(5)) ? "FLC/FRC," : "",
 		(sadb[1] & BIT(6)) ? "RLC/RRC," : "");
+#ifdef CONFIG_SEC_DISPLAYPORT
+	edid_ctrl->audio_channel_info |= (speaker_allocation << 8);
+#endif
 } /* hdmi_edid_extract_speaker_allocation_data */
 
 static void hdmi_edid_extract_sink_caps(struct hdmi_edid_ctrl *edid_ctrl,
@@ -1657,7 +1861,6 @@ static void hdmi_edid_detail_desc(struct hdmi_edid_ctrl *edid_ctrl,
 			(timing.refresh_rate % khz_to_hz) / 100,
 			(timing.refresh_rate % 100) / 10,
 			timing.refresh_rate % 10);
-
 		/*
 		 * Always add resolutions parsed from DTD in the reserved
 		 * timing info. This can avoid matching resolutions that have
@@ -1720,7 +1923,7 @@ static void hdmi_edid_add_sink_video_format(struct hdmi_edid_ctrl *edid_ctrl,
 		return;
 	}
 
-	DEV_DBG("%s: EDID: format: %d [%s], %s\n", __func__,
+	DEV_INFO("%s: EDID: format: %d [%s], %s\n", __func__,
 		video_format, msm_hdmi_mode_2string(video_format),
 		supported ? "Supported" : "Not-Supported");
 
@@ -2105,6 +2308,7 @@ static void hdmi_edid_get_display_mode(struct hdmi_edid_ctrl *edid_ctrl)
 		}
 	}
 
+
 	i = 0;
 	/* Read DTD resolutions from block0 */
 	while (4 > i && 0 != edid_blk0[0x36+desc_offset]) {
@@ -2322,6 +2526,13 @@ int hdmi_edid_parser(void *input)
 		goto bail;
 	}
 
+	/* Find out if CEA extension blocks exceeding max limit */
+	if (num_of_cea_blocks >= MAX_EDID_BLOCKS) {
+		DEV_WARN("%s: HDMI EDID exceeded max CEA blocks limit\n",
+				__func__);
+		num_of_cea_blocks = MAX_EDID_BLOCKS - 1;
+	}
+
 	/* check for valid CEA block */
 	if (edid_buf[EDID_BLOCK_SIZE] != 2) {
 		DEV_ERR("%s: Invalid CEA block\n", __func__);
@@ -2339,6 +2550,11 @@ int hdmi_edid_parser(void *input)
 	else
 		edid_ctrl->sink_mode = SINK_MODE_DVI;
 
+#ifdef CONFIG_SEC_DISPLAYPORT
+	edid_ctrl->audio_channel_info = 1<<26;
+	g_max_res_index = 0;
+	g_dex_max_res_index = 0;
+#endif
 	hdmi_edid_extract_sink_caps(edid_ctrl, edid_buf);
 	hdmi_edid_extract_latency_fields(edid_ctrl, edid_buf);
 	hdmi_edid_extract_dc(edid_ctrl, edid_buf);
@@ -2346,6 +2562,11 @@ int hdmi_edid_parser(void *input)
 	hdmi_edid_extract_audio_data_blocks(edid_ctrl, edid_buf);
 	hdmi_edid_extract_3d_present(edid_ctrl, edid_buf);
 	hdmi_edid_extract_extended_data_blocks(edid_ctrl, edid_buf);
+
+#ifdef CONFIG_SEC_DISPLAYPORT
+	if (edid_ctrl->audio_channel_info & 0xff)
+		edid_ctrl->sink_mode = SINK_MODE_HDMI;
+#endif
 
 bail:
 	for (i = 1; i <= num_of_cea_blocks; i++) {

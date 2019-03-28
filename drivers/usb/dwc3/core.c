@@ -115,6 +115,9 @@ static int dwc3_init_usb_phys(struct dwc3 *dwc)
 {
 	int		ret;
 
+	pr_err("%s: dwc->maximum_speed %d\n",
+				__func__, dwc->maximum_speed);
+	
 	/* Bring up PHYs */
 	ret = usb_phy_init(dwc->usb2_phy);
 	if (ret) {
@@ -1098,7 +1101,7 @@ static int dwc3_probe(struct platform_device *pdev)
 	dwc->regs_size	= resource_size(res);
 
 	/* default to highest possible threshold */
-	lpm_nyet_threshold = 0xf;
+	lpm_nyet_threshold = 0x0;
 
 	/* default to -3.5dB de-emphasis */
 	tx_de_emphasis = 1;
@@ -1333,8 +1336,6 @@ static int dwc3_remove(struct platform_device *pdev)
 	dwc3_event_buffers_cleanup(dwc);
 	dwc3_free_event_buffers(dwc);
 
-	usb_phy_set_suspend(dwc->usb2_phy, 1);
-	usb_phy_set_suspend(dwc->usb3_phy, 1);
 	phy_power_off(dwc->usb2_generic_phy);
 	phy_power_off(dwc->usb3_generic_phy);
 

@@ -55,6 +55,10 @@
 #define QUSB2PHY_1P2_VOL_MIN           1200000 /* uV */
 #define QUSB2PHY_1P2_VOL_MAX           1200000 /* uV */
 #define QUSB2PHY_1P2_HPM_LOAD          23000
+#ifdef CONFIG_USB_ANDROID_SAMSUNG_COMPOSITE
+#define SS_SYNC_VALUE			0xa
+#define SS_HIGH_TUNE1			0xf
+#endif
 
 #define QUSB2PHY_1P8_VOL_MIN           1800000 /* uV */
 #define QUSB2PHY_1P8_VOL_MAX           1800000 /* uV */
@@ -300,7 +304,6 @@ put_vdda18_lpm:
 	ret = regulator_set_load(qphy->vdda18, 0);
 	if (ret < 0)
 		dev_err(qphy->phy.dev, "Unable to set LPM of vdda18\n");
-
 disable_vdda12:
 	ret = regulator_disable(qphy->vdda12);
 	if (ret)
@@ -403,6 +406,16 @@ static void qusb_phy_get_tune1_param(struct qusb_phy *qphy)
 	qphy->tune_val = TUNE_VAL_MASK(qphy->tune_val,
 				qphy->efuse_bit_pos, bit_mask);
 	reg = readb_relaxed(qphy->base + QUSB2PHY_PORT_TUNE1);
+
+#ifdef CONFIG_USB_ANDROID_SAMSUNG_COMPOSITE
+	if(qphy->tune_val + SS_SYNC_VALUE >= SS_HIGH_TUNE1) {
+		pr_info("fail to apply SS_SYNC_VALUE. Qc efuse value is too high\n");
+		qphy->tune_val = SS_HIGH_TUNE1;
+	}
+	else {
+		qphy->tune_val += SS_SYNC_VALUE;
+	}
+#endif
 	if (qphy->tune_val) {
 		reg = reg & 0x0f;
 		reg |= (qphy->tune_val << 4);
@@ -415,9 +428,9 @@ static void qusb_phy_write_seq(void __iomem *base, u32 *seq, int cnt,
 {
 	int i;
 
-	pr_debug("Seq count:%d\n", cnt);
+	pr_info("Seq count:%d\n", cnt);
 	for (i = 0; i < cnt; i = i+2) {
-		pr_debug("write 0x%02x to 0x%02x\n", seq[i], seq[i+1]);
+		pr_info("write 0x%02x to 0x%02x\n", seq[i], seq[i+1]);
 		writel_relaxed(seq[i], base + seq[i+1]);
 		if (delay)
 			usleep_range(delay, (delay + 2000));
@@ -430,7 +443,7 @@ static void qusb_phy_host_init(struct usb_phy *phy)
 	int ret;
 	struct qusb_phy *qphy = container_of(phy, struct qusb_phy, phy);
 
-	dev_dbg(phy->dev, "%s\n", __func__);
+	dev_info(phy->dev, "%s\n", __func__);
 
 	/* Perform phy reset */
 	ret = reset_control_assert(qphy->phy_reset);
@@ -441,8 +454,30 @@ static void qusb_phy_host_init(struct usb_phy *phy)
 	if (ret)
 		dev_err(phy->dev, "%s: phy_reset deassert failed\n", __func__);
 
+	/* Disable the PHY */ 
+	writel_relaxed(readl_relaxed(qphy->base + QUSB2PHY_PWR_CTRL1) | 
+	PWR_CTRL1_POWR_DOWN, 
+	qphy->base + QUSB2PHY_PWR_CTRL1); 
+
 	qusb_phy_write_seq(qphy->base, qphy->qusb_phy_host_init_seq,
 			qphy->host_init_seq_len, 0);
+	if (qphy->efuse_reg) {
+		if (!qphy->tune_val)
+			qusb_phy_get_tune1_param(qphy);
+
+		pr_info("%s(): Programming TUNE1 parameter as:%x\n", __func__,
+				qphy->tune_val);
+		writel_relaxed(qphy->tune_val,
+				qphy->base + QUSB2PHY_PORT_TUNE1);
+	}
+
+	/* ensure above writes are completed before re-enabling PHY */ 
+	wmb(); 
+
+	/* Enable the PHY */ 
+	writel_relaxed(readl_relaxed(qphy->base + QUSB2PHY_PWR_CTRL1) & 
+	~PWR_CTRL1_POWR_DOWN, 
+	qphy->base + QUSB2PHY_PWR_CTRL1); 
 
 	/* Ensure above write is completed before turning ON ref clk */
 	wmb();
@@ -464,7 +499,7 @@ static int qusb_phy_init(struct usb_phy *phy)
 	int ret;
 	u8 reg;
 
-	dev_dbg(phy->dev, "%s\n", __func__);
+	dev_info(phy->dev, "%s\n", __func__);
 
 	/* bump up vdda33 voltage to operating level*/
 	ret = regulator_set_voltage(qphy->vdda33, qphy->vdda33_levels[1],

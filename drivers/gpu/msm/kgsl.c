@@ -1,4 +1,4 @@
-/* Copyright (c) 2008-2017, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2008-2018, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -62,6 +62,10 @@
 #define KGSL_DMA_BIT_MASK	DMA_BIT_MASK(64)
 #else
 #define KGSL_DMA_BIT_MASK	DMA_BIT_MASK(32)
+#endif
+
+#if defined(CONFIG_FB_MSM_MDSS_SAMSUNG)
+pid_t kgsl_mem_dump_pid = -EPERM;
 #endif
 
 static char *kgsl_mmu_type;
@@ -2263,7 +2267,7 @@ static long _gpuobj_map_useraddr(struct kgsl_device *device,
 		struct kgsl_mem_entry *entry,
 		struct kgsl_gpuobj_import *param)
 {
-	struct kgsl_gpuobj_import_useraddr useraddr;
+	struct kgsl_gpuobj_import_useraddr useraddr = {0};
 	int ret;
 
 	param->flags &= KGSL_MEMFLAGS_GPUREADONLY
@@ -2941,7 +2945,7 @@ long kgsl_ioctl_gpuobj_sync(struct kgsl_device_private *dev_priv,
 	long ret = 0;
 	bool full_flush = false;
 	uint64_t size = 0;
-	int i, count = 0;
+	int i;
 	void __user *ptr;
 
 	if (param->count == 0 || param->count > 128)
@@ -2953,8 +2957,8 @@ long kgsl_ioctl_gpuobj_sync(struct kgsl_device_private *dev_priv,
 
 	entries = kzalloc(param->count * sizeof(*entries), GFP_KERNEL);
 	if (entries == NULL) {
-		ret = -ENOMEM;
-		goto out;
+		kfree(objs);
+		return -ENOMEM;
 	}
 
 	ptr = to_user_ptr(param->objs);
@@ -2971,36 +2975,32 @@ long kgsl_ioctl_gpuobj_sync(struct kgsl_device_private *dev_priv,
 		if (entries[i] == NULL)
 			continue;
 
-		count++;
-
 		if (!(objs[i].op & KGSL_GPUMEM_CACHE_RANGE))
 			size += entries[i]->memdesc.size;
 		else if (objs[i].offset < entries[i]->memdesc.size)
 			size += (entries[i]->memdesc.size - objs[i].offset);
 
 		full_flush = check_full_flush(size, objs[i].op);
-		if (full_flush)
-			break;
+		if (full_flush) {
+			trace_kgsl_mem_sync_full_cache(i, size);
+			flush_cache_all();
+			goto out;
+		}
 
 		ptr += sizeof(*objs);
 	}
 
-	if (full_flush) {
-		trace_kgsl_mem_sync_full_cache(count, size);
-		flush_cache_all();
-	} else {
-		for (i = 0; !ret && i < param->count; i++)
-			if (entries[i])
-				ret = _kgsl_gpumem_sync_cache(entries[i],
-						objs[i].offset, objs[i].length,
-						objs[i].op);
-	}
+	for (i = 0; !ret && i < param->count; i++)
+		if (entries[i])
+			ret = _kgsl_gpumem_sync_cache(entries[i],
+					objs[i].offset, objs[i].length,
+					objs[i].op);
 
+out:
 	for (i = 0; i < param->count; i++)
 		if (entries[i])
 			kgsl_mem_entry_put(entries[i]);
 
-out:
 	kfree(entries);
 	kfree(objs);
 
@@ -3441,6 +3441,7 @@ long kgsl_ioctl_sparse_virt_free(struct kgsl_device_private *dev_priv,
 	return 0;
 }
 
+/* entry->bind_lock must be held by the caller */
 static int _sparse_add_to_bind_tree(struct kgsl_mem_entry *entry,
 		uint64_t v_offset,
 		struct kgsl_memdesc *memdesc,
@@ -3451,7 +3452,7 @@ static int _sparse_add_to_bind_tree(struct kgsl_mem_entry *entry,
 	struct sparse_bind_object *new;
 	struct rb_node **node, *parent = NULL;
 
-	new = kzalloc(sizeof(*new), GFP_KERNEL);
+	new = kzalloc(sizeof(*new), GFP_ATOMIC);
 	if (new == NULL)
 		return -ENOMEM;
 
@@ -3469,10 +3470,16 @@ static int _sparse_add_to_bind_tree(struct kgsl_mem_entry *entry,
 		parent = *node;
 		this = rb_entry(parent, struct sparse_bind_object, node);
 
-		if (new->v_off < this->v_off)
+		if ((new->v_off < this->v_off) &&
+			((new->v_off + new->size) <= this->v_off))
 			node = &parent->rb_left;
-		else if (new->v_off > this->v_off)
+		else if ((new->v_off > this->v_off) &&
+			(new->v_off >= (this->v_off + this->size)))
 			node = &parent->rb_right;
+		else {
+			kfree(new);
+			return -EADDRINUSE;
+		}
 	}
 
 	rb_link_node(&new->node, parent, node);
@@ -3485,7 +3492,6 @@ static int _sparse_rm_from_bind_tree(struct kgsl_mem_entry *entry,
 		struct sparse_bind_object *obj,
 		uint64_t v_offset, uint64_t size)
 {
-	spin_lock(&entry->bind_lock);
 	if (v_offset == obj->v_off && size >= obj->size) {
 		/*
 		 * We are all encompassing, remove the entry and free
@@ -3518,7 +3524,6 @@ static int _sparse_rm_from_bind_tree(struct kgsl_mem_entry *entry,
 
 		obj->size = v_offset - obj->v_off;
 
-		spin_unlock(&entry->bind_lock);
 		ret = _sparse_add_to_bind_tree(entry, v_offset + size,
 				obj->p_memdesc,
 				obj->p_off + (v_offset - obj->v_off) + size,
@@ -3528,19 +3533,16 @@ static int _sparse_rm_from_bind_tree(struct kgsl_mem_entry *entry,
 		return ret;
 	}
 
-	spin_unlock(&entry->bind_lock);
-
 	return 0;
 }
 
+/* entry->bind_lock must be held by the caller */
 static struct sparse_bind_object *_find_containing_bind_obj(
 		struct kgsl_mem_entry *entry,
 		uint64_t offset, uint64_t size)
 {
 	struct sparse_bind_object *obj = NULL;
 	struct rb_node *node = entry->bind_tree.rb_node;
-
-	spin_lock(&entry->bind_lock);
 
 	while (node != NULL) {
 		obj = rb_entry(node, struct sparse_bind_object, node);
@@ -3560,32 +3562,15 @@ static struct sparse_bind_object *_find_containing_bind_obj(
 		}
 	}
 
-	spin_unlock(&entry->bind_lock);
-
 	return obj;
 }
 
+/* entry->bind_lock must be held by the caller */
 static int _sparse_unbind(struct kgsl_mem_entry *entry,
 		struct sparse_bind_object *bind_obj,
 		uint64_t offset, uint64_t size)
 {
-	struct kgsl_memdesc *memdesc = bind_obj->p_memdesc;
-	struct kgsl_pagetable *pt = memdesc->pagetable;
 	int ret;
-
-	if (memdesc->cur_bindings < (size / PAGE_SIZE))
-		return -EINVAL;
-
-	memdesc->cur_bindings -= size / PAGE_SIZE;
-
-	ret = kgsl_mmu_unmap_offset(pt, memdesc,
-			entry->memdesc.gpuaddr, offset, size);
-	if (ret)
-		return ret;
-
-	ret = kgsl_mmu_sparse_dummy_map(pt, &entry->memdesc, offset, size);
-	if (ret)
-		return ret;
 
 	ret = _sparse_rm_from_bind_tree(entry, bind_obj, offset, size);
 	if (ret == 0) {
@@ -3600,6 +3585,8 @@ static long sparse_unbind_range(struct kgsl_sparse_binding_object *obj,
 	struct kgsl_mem_entry *virt_entry)
 {
 	struct sparse_bind_object *bind_obj;
+	struct kgsl_memdesc *memdesc;
+	struct kgsl_pagetable *pt;
 	int ret = 0;
 	uint64_t size = obj->size;
 	uint64_t tmp_size = obj->size;
@@ -3607,9 +3594,14 @@ static long sparse_unbind_range(struct kgsl_sparse_binding_object *obj,
 
 	while (size > 0 && ret == 0) {
 		tmp_size = size;
+
+		spin_lock(&virt_entry->bind_lock);
 		bind_obj = _find_containing_bind_obj(virt_entry, offset, size);
-		if (bind_obj == NULL)
+
+		if (bind_obj == NULL) {
+			spin_unlock(&virt_entry->bind_lock);
 			return 0;
+		}
 
 		if (bind_obj->v_off > offset) {
 			tmp_size = size - bind_obj->v_off - offset;
@@ -3626,7 +3618,28 @@ static long sparse_unbind_range(struct kgsl_sparse_binding_object *obj,
 				tmp_size = bind_obj->size;
 		}
 
+		memdesc = bind_obj->p_memdesc;
+		pt = memdesc->pagetable;
+
+		if (memdesc->cur_bindings < (tmp_size / PAGE_SIZE)) {
+			spin_unlock(&virt_entry->bind_lock);
+			return -EINVAL;
+		}
+
+		memdesc->cur_bindings -= tmp_size / PAGE_SIZE;
+
 		ret = _sparse_unbind(virt_entry, bind_obj, offset, tmp_size);
+		spin_unlock(&virt_entry->bind_lock);
+
+		ret = kgsl_mmu_unmap_offset(pt, memdesc,
+				virt_entry->memdesc.gpuaddr, offset, tmp_size);
+		if (ret)
+			return ret;
+
+		ret = kgsl_mmu_sparse_dummy_map(pt, memdesc, offset, tmp_size);
+		if (ret)
+			return ret;
+
 		if (ret == 0) {
 			offset += tmp_size;
 			size -= tmp_size;
@@ -3687,8 +3700,11 @@ static int _sparse_bind(struct kgsl_process_private *process,
 		return ret;
 	}
 
+	spin_lock(&virt_entry->bind_lock);
 	ret = _sparse_add_to_bind_tree(virt_entry, v_offset, memdesc,
 			p_offset, size, flags);
+	spin_unlock(&virt_entry->bind_lock);
+
 	if (ret == 0)
 		memdesc->cur_bindings += size / PAGE_SIZE;
 
@@ -4383,6 +4399,12 @@ kgsl_get_unmapped_area(struct file *file, unsigned long addr,
 	struct kgsl_device *device = dev_priv->device;
 	struct kgsl_mem_entry *entry = NULL;
 
+#if defined(CONFIG_FB_MSM_MDSS_SAMSUNG)
+	struct task_struct *task;
+	struct mm_struct *mm;
+	unsigned long total_vm = 0;
+#endif
+
 	if (vma_offset == (unsigned long) device->memstore.gpuaddr)
 		return get_unmapped_area(NULL, addr, len, pgoff, flags);
 
@@ -4399,16 +4421,36 @@ kgsl_get_unmapped_area(struct file *file, unsigned long addr,
 	if (!kgsl_memdesc_use_cpu_map(&entry->memdesc)) {
 		val = get_unmapped_area(NULL, addr, len, 0, flags);
 		if (IS_ERR_VALUE(val))
-			KGSL_MEM_ERR(device,
+			KGSL_DRV_ERR_RATELIMIT(device,
 				"get_unmapped_area: pid %d addr %lx pgoff %lx len %ld failed error %d\n",
 				private->pid, addr, pgoff, len, (int) val);
 	} else {
 		 val = _get_svm_area(private, entry, addr, len, flags);
 		 if (IS_ERR_VALUE(val))
-			KGSL_MEM_ERR(device,
+			KGSL_DRV_ERR_RATELIMIT(device,
 				"_get_svm_area: pid %d mmap_base %lx addr %lx pgoff %lx len %ld failed error %d\n",
 				private->pid, current->mm->mmap_base, addr,
 				pgoff, len, (int) val);
+
+#if defined(CONFIG_FB_MSM_MDSS_SAMSUNG)
+		if (IS_ERR_VALUE(val)) {
+			kgsl_mem_dump_pid = private->pid;
+
+			task = find_task_by_vpid(kgsl_mem_dump_pid);
+
+			if (!IS_ERR_OR_NULL(task)) {
+				mm = task->mm;
+				if (!IS_ERR_OR_NULL(mm))
+					total_vm = mm->total_vm;
+				else
+					total_vm = 0;
+
+				pr_err("%s kgsl_dump_pid : %d pid : %d name : %16s total_vm : 0x%lx\n",
+					__func__, kgsl_mem_dump_pid, task->pid, task->comm, total_vm);
+			} else
+				pr_err("%s kgsl_dump_pid : %d \n",__func__, kgsl_mem_dump_pid);
+		}
+#endif
 	}
 
 put:
@@ -4816,6 +4858,25 @@ void kgsl_device_platform_remove(struct kgsl_device *device)
 }
 EXPORT_SYMBOL(kgsl_device_platform_remove);
 
+static int kgsl_sharedmem_size_notifier(struct notifier_block *nb,
+					unsigned long action, void *data)
+{
+	struct seq_file *s;
+
+	s = (struct seq_file *)data;
+	if (s != NULL)
+		seq_printf(s, "KgslSharedmem:  %8lu kB\n",
+			atomic_long_read(&kgsl_driver.stats.page_alloc) >> 10);
+	else
+		pr_cont("KgslSharedmem:%lukB ",
+			atomic_long_read(&kgsl_driver.stats.page_alloc) >> 10);
+	return 0;
+}
+
+static struct notifier_block kgsl_sharedmem_size_nb = {
+	.notifier_call = kgsl_sharedmem_size_notifier,
+};
+
 static void kgsl_core_exit(void)
 {
 	kgsl_events_exit();
@@ -4842,6 +4903,7 @@ static void kgsl_core_exit(void)
 
 	kgsl_memfree_exit();
 	unregister_chrdev_region(kgsl_driver.major, KGSL_DEVICE_MAX);
+	show_mem_extra_notifier_unregister(&kgsl_sharedmem_size_nb);
 }
 
 static int __init kgsl_core_init(void)
@@ -4933,6 +4995,8 @@ static int __init kgsl_core_init(void)
 		goto err;
 
 	kgsl_memfree_init();
+
+	show_mem_extra_notifier_register(&kgsl_sharedmem_size_nb);
 
 	return 0;
 

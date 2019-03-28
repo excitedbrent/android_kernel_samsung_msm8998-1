@@ -1,4 +1,4 @@
-/* Copyright (c) 2013-2017, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -885,8 +885,11 @@ static int msm_vfe44_fetch_engine_start(struct vfe_device *vfe_dev,
 			vfe_dev->buf_mgr, fe_cfg->session_id,
 			fe_cfg->stream_id);
 		vfe_dev->fetch_engine_info.bufq_handle = bufq_handle;
+
+		mutex_lock(&vfe_dev->buf_mgr->lock);
 		rc = vfe_dev->buf_mgr->ops->get_buf_by_index(
 			vfe_dev->buf_mgr, bufq_handle, fe_cfg->buf_idx, &buf);
+		mutex_unlock(&vfe_dev->buf_mgr->lock);
 		if (rc < 0) {
 			pr_err("%s: No fetch buffer\n", __func__);
 			return -EINVAL;
@@ -1720,7 +1723,7 @@ static void msm_vfe44_stats_update_cgc_override(struct vfe_device *vfe_dev,
 
 static void msm_vfe44_stats_update_ping_pong_addr(
 	struct vfe_device *vfe_dev, struct msm_vfe_stats_stream *stream_info,
-	uint32_t pingpong_status, dma_addr_t paddr, uint32_t buf_sz)
+	uint32_t pingpong_status, dma_addr_t paddr, uint32_t buf_size)
 {
 	void __iomem *vfe_base = vfe_dev->vfe_base;
 	int vfe_idx = msm_isp_get_vfe_idx_for_stats_stream(vfe_dev,
@@ -1825,7 +1828,6 @@ struct msm_vfe_hardware_info vfe44_hw_info = {
 			.process_stats_irq = msm_isp_process_stats_irq,
 			.process_epoch_irq = msm_vfe44_process_epoch_irq,
 			.config_irq = msm_vfe44_config_irq,
-			.preprocess_camif_irq = msm_isp47_preprocess_camif_irq,
 		},
 		.axi_ops = {
 			.reload_wm = msm_vfe44_axi_reload_wm,

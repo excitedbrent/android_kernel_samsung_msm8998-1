@@ -618,6 +618,38 @@ static void wcd_cntl_do_shutdown(struct wcd_dsp_cntl *cntl)
 	cntl->is_wdsp_booted = false;
 }
 
+static u16 regs_to_dump[] = {
+	0x21F,
+	0x201,
+	0x202,
+	0x203,
+	0x204,
+	0x205,
+	0x206,
+	0x207,
+	0x208,
+	0x209,
+	0x20A,
+	0x20B,
+	0x20F,
+	0x221,
+	0x222,
+	0x225,
+	0x226,
+};
+
+static void wdsp_dump_dbg_registers(struct snd_soc_codec *codec)
+{
+	u8 reg_val;
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(regs_to_dump); i++) {
+		reg_val = snd_soc_read(codec, regs_to_dump[i]);
+		pr_err("%s: reg 0x%x, value = 0x%x\n",
+			__func__, regs_to_dump[i], reg_val);
+	}
+}
+
 static int wcd_cntl_do_boot(struct wcd_dsp_cntl *cntl)
 {
 	struct snd_soc_codec *codec = cntl->codec;
@@ -663,6 +695,19 @@ static int wcd_cntl_do_boot(struct wcd_dsp_cntl *cntl)
 	if (!ret) {
 		dev_err(codec->dev, "%s: WDSP boot timed out\n",
 			__func__);
+		snd_soc_write(codec, WCD934X_CPE_SS_BACKUP_INT, 0x02);
+
+		wdsp_dump_dbg_registers(codec);
+
+		msleep(1000);
+		if (cntl->m_dev && cntl->m_ops &&
+		    cntl->m_ops->signal_handler)
+			ret = cntl->m_ops->signal_handler(cntl->m_dev, WDSP_DBG_RAMDUMP_SIGNAL,
+						  NULL);
+		else
+			dev_err(codec->dev, "%s: no signal handler callback ??\n",
+				__func__);
+
 		ret = -ETIMEDOUT;
 		goto err_boot;
 	} else {
@@ -763,10 +808,6 @@ static int wcd_control_handler(struct device *dev, void *priv_data,
 	case WDSP_EVENT_DLOAD_FAILED:
 	case WDSP_EVENT_POST_SHUTDOWN:
 
-		if (event == WDSP_EVENT_POST_DLOAD_CODE)
-			/* Mark DSP online since code download is complete */
-			wcd_cntl_change_online_state(cntl, 1);
-
 		/* Disable CPAR */
 		wcd_cntl_cpar_ctrl(cntl, false);
 		/* Disable all the clocks */
@@ -775,6 +816,11 @@ static int wcd_control_handler(struct device *dev, void *priv_data,
 			dev_err(codec->dev,
 				"%s: Failed to disable clocks, err = %d\n",
 				__func__, ret);
+
+		if (event == WDSP_EVENT_POST_DLOAD_CODE)
+			/* Mark DSP online since code download is complete */
+			wcd_cntl_change_online_state(cntl, 1);
+
 		break;
 
 	case WDSP_EVENT_PRE_DLOAD_DATA:
@@ -1005,11 +1051,9 @@ static int wcd_control_init(struct device *dev, void *priv_data)
 		goto done;
 	}
 
-	/* Unmask the fatal irqs */
-	snd_soc_write(codec, WCD934X_CPE_SS_SS_ERROR_INT_MASK_0A,
-		      ~(cntl->irqs.fatal_irqs & 0xFF));
-	snd_soc_write(codec, WCD934X_CPE_SS_SS_ERROR_INT_MASK_0B,
-		      ~((cntl->irqs.fatal_irqs >> 8) & 0xFF));
+	/* Unmask all the irqs */
+	snd_soc_write(codec, WCD934X_CPE_SS_SS_ERROR_INT_MASK_0A, 0x0E);
+	snd_soc_write(codec, WCD934X_CPE_SS_SS_ERROR_INT_MASK_0B, 0x00);
 
 	/*
 	 * CPE ERR irq is used only for error reporting from WCD DSP,

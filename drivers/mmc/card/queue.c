@@ -12,6 +12,7 @@
 #include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/blkdev.h>
+#include <linux/backing-dev.h>
 #include <linux/freezer.h>
 #include <linux/kthread.h>
 #include <linux/scatterlist.h>
@@ -160,7 +161,12 @@ static int mmc_queue_thread(void *d)
 
 		spin_lock_irq(q->queue_lock);
 		set_current_state(TASK_INTERRUPTIBLE);
-		req = blk_fetch_request(q);
+		if (mq->mqrq_prev->req &&
+				(card && (card->type == MMC_TYPE_SD) &&
+				 card->host->pm_progress))
+			req = NULL;
+		else
+			req = blk_fetch_request(q);
 		mq->mqrq_cur->req = req;
 		spin_unlock_irq(q->queue_lock);
 
@@ -483,6 +489,15 @@ success:
 	mq->thread = kthread_run(mmc_queue_thread, mq, "mmcqd/%d%s",
 		host->index, subname ? subname : "");
 
+#ifdef CONFIG_LARGE_DIRTY_BUFFER
+	if (mmc_card_sd(card)) {
+		/* apply more throttle on external sdcard */
+		mq->queue->backing_dev_info.max_ratio = 20;
+		mq->queue->backing_dev_info.min_ratio = 20;
+		mq->queue->backing_dev_info.capabilities |= BDI_CAP_STRICTLIMIT;
+	}
+#endif
+
 	if (IS_ERR(mq->thread)) {
 		ret = PTR_ERR(mq->thread);
 		goto free_bounce_sg;
@@ -721,13 +736,15 @@ int mmc_queue_suspend(struct mmc_queue *mq, int wait)
 		if (wait) {
 
 			/*
-			 * After blk_cleanup_queue is called, wait for all
+			 * After blk_stop_queue is called, wait for all
 			 * active_reqs to complete.
 			 * Then wait for cmdq thread to exit before calling
 			 * cmdq shutdown to avoid race between issuing
 			 * requests and shutdown of cmdq.
 			 */
-			blk_cleanup_queue(q);
+			spin_lock_irqsave(q->queue_lock, flags);
+			blk_stop_queue(q);
+			spin_unlock_irqrestore(q->queue_lock, flags);
 
 			if (host->cmdq_ctx.active_reqs)
 				wait_for_completion(
@@ -752,15 +769,9 @@ int mmc_queue_suspend(struct mmc_queue *mq, int wait)
 	}
 
 	if (!(test_and_set_bit(MMC_QUEUE_SUSPENDED, &mq->flags))) {
-		if (!wait) {
-			/* suspend/stop the queue in case of suspend */
-			spin_lock_irqsave(q->queue_lock, flags);
-			blk_stop_queue(q);
-			spin_unlock_irqrestore(q->queue_lock, flags);
-		} else {
-			/* shutdown the queue in case of shutdown/reboot */
-			blk_cleanup_queue(q);
-		}
+		spin_lock_irqsave(q->queue_lock, flags);
+		blk_stop_queue(q);
+		spin_unlock_irqrestore(q->queue_lock, flags);
 
 		rc = down_trylock(&mq->thread_sem);
 		if (rc && !wait) {
@@ -773,9 +784,28 @@ int mmc_queue_suspend(struct mmc_queue *mq, int wait)
 			blk_start_queue(q);
 			spin_unlock_irqrestore(q->queue_lock, flags);
 			rc = -EBUSY;
-		} else if (rc && wait) {
-			down(&mq->thread_sem);
-			rc = 0;
+		} else if (wait) {
+			struct request *req;
+			printk("%s: mq->flags: %ld, q->queue_flags: 0x%lx, \
+					q->in_flight (%d, %d) \n",
+					mmc_hostname(mq->card->host), mq->flags,
+					q->queue_flags, q->in_flight[0], q->in_flight[1]);
+			mutex_lock(&q->sysfs_lock);
+			queue_flag_set_unlocked(QUEUE_FLAG_DYING, q);
+			spin_lock_irqsave(q->queue_lock, flags);
+			queue_flag_set(QUEUE_FLAG_DYING, q);
+
+			while ((req = blk_fetch_request(q)) != NULL) {
+				req->cmd_flags |= REQ_QUIET;
+				__blk_end_request_all(req, -EIO);
+			}
+
+			spin_unlock_irqrestore(q->queue_lock, flags);
+			mutex_unlock(&q->sysfs_lock);
+			if (rc) {
+				down(&mq->thread_sem);
+				rc = 0;
+			}
 		}
 	}
 out:

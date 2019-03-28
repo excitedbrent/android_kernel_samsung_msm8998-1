@@ -56,7 +56,7 @@
 
 #define MSM_LIMITS_DOMAIN_MAX		0x444D4158
 
-#define MSM_LIMITS_HIGH_THRESHOLD_VAL	95000
+#define MSM_LIMITS_HIGH_THRESHOLD_VAL	85000
 #define MSM_LIMITS_ARM_THRESHOLD_VAL	65000
 #define MSM_LIMITS_LOW_THRESHOLD_OFFSET 500
 #define MSM_LIMITS_POLLING_DELAY_MS	10
@@ -91,9 +91,25 @@ struct msm_lmh_dcvs_hw {
 	uint32_t hw_freq_limit;
 	struct list_head list;
 	DECLARE_BITMAP(is_irq_enabled, 1);
+#ifdef CONFIG_SEC_PM
+	uint32_t prev_max_freq;
+	uint32_t lowest_freq;
+	bool limiting;
+#endif
 };
 
 LIST_HEAD(lmh_dcvs_hw_list);
+
+#ifdef CONFIG_SEC_PM
+#include <linux/ipc_logging.h>
+void *lmh_dcvs_ipc_log;
+#define LMHDCVS_IPC_LOG_PAGES	10
+#define LMHDCVS_IPC_LOG(msg...)					\
+	do {							\
+		if (lmh_dcvs_ipc_log)				\
+			ipc_log_string(lmh_dcvs_ipc_log, msg);	\
+	} while (0)
+#endif
 
 static void msm_lmh_dcvs_get_max_freq(uint32_t cpu, uint32_t *max_freq)
 {
@@ -165,12 +181,27 @@ static void msm_lmh_dcvs_poll(unsigned long data)
 	max_limit = msm_lmh_mitigation_notify(hw);
 	if (max_limit >= hw->max_freq) {
 		del_timer(&hw->poll_timer);
+#ifdef CONFIG_SEC_PM
+		LMHDCVS_IPC_LOG("Finished lmh cpu%d, lowest freq %d\n",
+			cpumask_first(&hw->core_map), hw->lowest_freq);
+		hw->limiting = false;
+		hw->lowest_freq = UINT_MAX;
+#endif
 		writel_relaxed(0xFF, hw->int_clr_reg);
 		set_bit(1, hw->is_irq_enabled);
 		enable_irq(hw->irq_num);
 	} else {
 		mod_timer(&hw->poll_timer, jiffies + msecs_to_jiffies(
 			MSM_LIMITS_POLLING_DELAY_MS));
+	}
+
+#ifdef CONFIG_SEC_PM
+	if (max_limit < hw->lowest_freq)
+		hw->lowest_freq = max_limit;
+
+	if ((hw->limiting == true) && (hw->prev_max_freq != max_limit)) {
+		hw->prev_max_freq = max_limit;
+#endif
 	}
 }
 
@@ -189,6 +220,12 @@ static irqreturn_t lmh_dcvs_handle_isr(int irq, void *data)
 	struct msm_lmh_dcvs_hw *hw = data;
 
 	lmh_dcvs_notify(hw);
+#ifdef CONFIG_SEC_PM
+		LMHDCVS_IPC_LOG("Start lmh cpu%d @%d\n",
+			cpumask_first(&hw->core_map), hw->hw_freq_limit);
+#endif
+	hw->limiting = true;
+
 	return IRQ_HANDLED;
 }
 
@@ -443,6 +480,10 @@ static int msm_lmh_dcvs_probe(struct platform_device *pdev)
 	hw->default_hi.trip = THERMAL_TRIP_CONFIGURABLE_HI;
 	hw->default_hi.notify = trip_notify;
 
+#ifdef CONFIG_SEC_PM
+	hw->limiting = false;
+#endif	
+
 	/*
 	 * Setup virtual thermal zones for each LMH-DCVS hardware
 	 * The sensor does not do actual thermal temperature readings
@@ -533,6 +574,15 @@ static int msm_lmh_dcvs_probe(struct platform_device *pdev)
 
 	INIT_LIST_HEAD(&hw->list);
 	list_add(&hw->list, &lmh_dcvs_hw_list);
+
+#ifdef CONFIG_SEC_PM
+	if (!lmh_dcvs_ipc_log)
+		lmh_dcvs_ipc_log = ipc_log_context_create(
+					LMHDCVS_IPC_LOG_PAGES, "lmh_dcvs", 0);
+
+	if (!lmh_dcvs_ipc_log)
+		pr_err("%s: Failed to create lmh logging context\n", __func__);
+#endif
 
 	return ret;
 }

@@ -38,6 +38,12 @@
 
 #include "qseecom_kernel.h"
 
+#ifdef CONFIG_SEC_DISPLAYPORT
+#include <linux/dp_logger.h>
+#endif
+
+#include "qseecom_kernel.h"
+
 #define TZAPP_NAME            "hdcp2p2"
 #define HDCP1_APP_NAME        "hdcp1"
 #define QSEECOM_SBUFF_SIZE    0x1000
@@ -2330,6 +2336,7 @@ int hdcp1_set_enc(bool enable)
 
 	if (rc < 0) {
 		pr_err("qseecom cmd failed err=%d\n", rc);
+		rc = -EINVAL;
 		goto end;
 	}
 

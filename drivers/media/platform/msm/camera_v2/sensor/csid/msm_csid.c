@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2017, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2011-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -58,7 +58,6 @@
 #define TRUE   1
 #define FALSE  0
 
-#define MAX_LANE_COUNT 4
 #define CSID_TIMEOUT msecs_to_jiffies(100)
 
 #undef CDBG
@@ -245,7 +244,7 @@ static int msm_csid_reset(struct csid_device *csid_dev)
 			__func__, csid_dev->pdev->id, irq);
 		if (irq & (0x1 << irq_bitshift)) {
 			rc = 1;
-			CDBG("%s succeeded", __func__);
+			pr_warn("%s succeeded: irq_read", __func__);
 		} else {
 			rc = 0;
 			pr_err("%s reset csid_irq_status failed = 0x%x\n",
@@ -254,7 +253,7 @@ static int msm_csid_reset(struct csid_device *csid_dev)
 		if (rc == 0)
 			rc = -ETIMEDOUT;
 	} else {
-		CDBG("%s succeeded", __func__);
+		pr_warn("%s succeeded: normal", __func__);
 	}
 	return rc;
 }
@@ -303,12 +302,6 @@ static int msm_csid_config(struct csid_device *csid_dev,
 		csid_params->lane_assign);
 	CDBG("%s csid_params phy_sel = %d\n", __func__,
 		csid_params->phy_sel);
-	if ((csid_params->lane_cnt == 0) ||
-		(csid_params->lane_cnt > MAX_LANE_COUNT)) {
-		pr_err("%s:%d invalid lane count = %d\n",
-			__func__, __LINE__, csid_params->lane_cnt);
-		return -EINVAL;
-	}
 
 	csid_dev->csid_lane_cnt = csid_params->lane_cnt;
 	rc = msm_csid_reset(csid_dev);

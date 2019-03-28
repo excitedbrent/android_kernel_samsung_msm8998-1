@@ -160,6 +160,7 @@ static void ion_buffer_add(struct ion_device *dev,
 	struct rb_node **p = &dev->buffers.rb_node;
 	struct rb_node *parent = NULL;
 	struct ion_buffer *entry;
+	struct task_struct *task;
 
 	while (*p) {
 		parent = *p;
@@ -174,6 +175,10 @@ static void ion_buffer_add(struct ion_device *dev,
 			BUG();
 		}
 	}
+
+	task = current->group_leader;
+	get_task_comm(buffer->task_comm, task);
+	buffer->pid = task_pid_nr(task);
 
 	rb_link_node(&buffer->node, parent, p);
 	rb_insert_color(&buffer->node, &dev->buffers);
@@ -190,6 +195,7 @@ static struct ion_buffer *ion_buffer_create(struct ion_heap *heap,
 	struct sg_table *table;
 	struct scatterlist *sg;
 	int i, ret;
+	long nr_alloc_cur, nr_alloc_peak;
 
 	buffer = kzalloc(sizeof(struct ion_buffer), GFP_KERNEL);
 	if (!buffer)
@@ -264,7 +270,10 @@ static struct ion_buffer *ion_buffer_create(struct ion_heap *heap,
 	mutex_lock(&dev->buffer_lock);
 	ion_buffer_add(dev, buffer);
 	mutex_unlock(&dev->buffer_lock);
-	atomic_add(len, &heap->total_allocated);
+	nr_alloc_cur = atomic_long_add_return(len, &heap->total_allocated);
+	nr_alloc_peak = atomic_long_read(&heap->total_allocated_peak);
+	if (nr_alloc_cur > nr_alloc_peak)
+		atomic_long_set(&heap->total_allocated_peak, nr_alloc_cur);
 	return buffer;
 
 err:
@@ -282,7 +291,7 @@ void ion_buffer_destroy(struct ion_buffer *buffer)
 		buffer->heap->ops->unmap_kernel(buffer->heap, buffer);
 	buffer->heap->ops->unmap_dma(buffer->heap, buffer);
 
-	atomic_sub(buffer->size, &buffer->heap->total_allocated);
+	atomic_long_sub(buffer->size, &buffer->heap->total_allocated);
 	buffer->heap->ops->free(buffer);
 	vfree(buffer->pages);
 	kfree(buffer);
@@ -320,7 +329,7 @@ static void ion_buffer_add_to_handle(struct ion_buffer *buffer)
 {
 	mutex_lock(&buffer->lock);
 	if (buffer->handle_count == 0)
-		atomic_add(buffer->size, &buffer->heap->total_handles);
+		atomic_long_add(buffer->size, &buffer->heap->total_handles);
 
 	buffer->handle_count++;
 	mutex_unlock(&buffer->lock);
@@ -346,7 +355,7 @@ static void ion_buffer_remove_from_handle(struct ion_buffer *buffer)
 		task = current->group_leader;
 		get_task_comm(buffer->task_comm, task);
 		buffer->pid = task_pid_nr(task);
-		atomic_sub(buffer->size, &buffer->heap->total_handles);
+		atomic_long_sub(buffer->size, &buffer->heap->total_handles);
 	}
 	mutex_unlock(&buffer->lock);
 }
@@ -556,6 +565,27 @@ static int ion_handle_add(struct ion_client *client, struct ion_handle *handle)
 	return 0;
 }
 
+static size_t ion_buffer_get_total_size_by_pid(struct ion_client *client)
+{
+	struct ion_device *dev = client->dev;
+	pid_t pid = client->pid;
+	size_t pid_total_size = 0;
+	struct rb_node *n;
+
+	mutex_lock(&dev->buffer_lock);
+	for (n = rb_first(&dev->buffers); n; n = rb_next(n)) {
+		struct ion_buffer *buffer = rb_entry(n, struct ion_buffer,
+						     node);
+		mutex_lock(&buffer->lock);
+		if (pid == buffer->pid)
+			pid_total_size += buffer->size;
+		mutex_unlock(&buffer->lock);
+	}
+	mutex_unlock(&dev->buffer_lock);
+
+	return pid_total_size;
+}
+
 static struct ion_handle *__ion_alloc(struct ion_client *client, size_t len,
 			     size_t align, unsigned int heap_id_mask,
 			     unsigned int flags, bool grab_handle)
@@ -591,6 +621,16 @@ static struct ion_handle *__ion_alloc(struct ion_client *client, size_t len,
 
 	if (!len)
 		return ERR_PTR(-EINVAL);
+
+	if (len / PAGE_SIZE > totalram_pages / 4) {
+		size_t pid_total_size = ion_buffer_get_total_size_by_pid(client);
+
+		if ((len + pid_total_size) / PAGE_SIZE > totalram_pages / 2) {
+			pr_err("%s: len %zu total %zu heap_id_mask %u flags %x\n",
+			       __func__, len, pid_total_size, heap_id_mask, flags);
+			return ERR_PTR(-EINVAL);
+		}
+	}
 
 	down_read(&dev->lock);
 	plist_for_each_entry(heap, &dev->heaps, node) {
@@ -1561,6 +1601,11 @@ static int ion_sync_for_device(struct ion_client *client, int fd)
 	}
 	buffer = dmabuf->priv;
 
+	if (get_secure_vmid(buffer->flags) > 0) {
+		pr_err("%s: cannot sync a secure dmabuf\n", __func__);
+		dma_buf_put(dmabuf);
+		return -EINVAL;
+	}
 	dma_sync_sg_for_device(NULL, buffer->sg_table->sgl,
 			       buffer->sg_table->nents, DMA_BIDIRECTIONAL);
 	dma_buf_put(dmabuf);
@@ -1914,6 +1959,8 @@ static int ion_debug_heap_show(struct seq_file *s, void *unused)
 	seq_printf(s, "%16s %16zu\n", "total orphaned",
 		   total_orphaned_size);
 	seq_printf(s, "%16s %16zu\n", "total ", total_size);
+	seq_printf(s, "%16.s %16lu\n", "peak allocated",
+		atomic_long_read(&heap->total_allocated_peak));
 	if (heap->flags & ION_HEAP_FLAG_DEFER_FREE)
 		seq_printf(s, "%16s %16zu\n", "deferred free",
 				heap->free_list_size);
@@ -1938,6 +1985,20 @@ static const struct file_operations debug_heap_fops = {
 	.release = single_release,
 };
 
+void show_ion_system_heap_pool_size(struct ion_device *dev, struct seq_file *s)
+{
+	if (!down_read_trylock(&dev->lock)) {
+		if (s)
+			seq_printf(s, "SystemHeapPool: NA\n");
+		else
+			pr_cont("SystemHeapPool:NA ");
+		return;
+	}
+
+	show_ion_system_heap_pool_size_locked(s);
+	up_read(&dev->lock);
+}
+
 void show_ion_usage(struct ion_device *dev)
 {
 	struct ion_heap *heap;
@@ -1951,10 +2012,10 @@ void show_ion_usage(struct ion_device *dev)
 					"Total orphaned size");
 	pr_info("---------------------------------\n");
 	plist_for_each_entry(heap, &dev->heaps, node) {
-		pr_info("%16.s 0x%16.x 0x%16.x\n",
-			heap->name, atomic_read(&heap->total_allocated),
-			atomic_read(&heap->total_allocated) -
-			atomic_read(&heap->total_handles));
+		pr_info("%16.s 0x%16.lx 0x%16.lx\n",
+			heap->name, atomic_long_read(&heap->total_allocated),
+			atomic_long_read(&heap->total_allocated) -
+			atomic_long_read(&heap->total_handles));
 		if (heap->debug_show)
 			heap->debug_show(heap, NULL, 0);
 

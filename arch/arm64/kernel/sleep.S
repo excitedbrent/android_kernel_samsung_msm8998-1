@@ -2,6 +2,9 @@
 #include <linux/linkage.h>
 #include <asm/asm-offsets.h>
 #include <asm/assembler.h>
+#ifdef CONFIG_RKP_CFP
+#include <asm/rkp_cfp.h>
+#endif
 
 	.text
 /*
@@ -141,8 +144,14 @@ ENTRY(_cpu_resume)
 	ldp	x21, x22, [x29, #32]
 	ldp	x23, x24, [x29, #48]
 	ldp	x25, x26, [x29, #64]
+#ifdef CONFIG_RKP_CFP_ROPP //assume SYSREGKEY is used
+	ropp_load_mk
+	mrs	x28, sp_el0
+	ropp_load_key	x28
+#endif
 	ldp	x27, x28, [x29, #80]
 	ldp	x29, lr, [x29]
 	mov	x0, #0
 	ret
 ENDPROC(_cpu_resume)
+

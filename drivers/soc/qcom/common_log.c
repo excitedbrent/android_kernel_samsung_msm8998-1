@@ -18,6 +18,7 @@
 #include <linux/slab.h>
 #include <linux/kmemleak.h>
 #include <linux/async.h>
+#include <linux/thread_info.h>
 #include <soc/qcom/memory_dump.h>
 #include <soc/qcom/minidump.h>
 #include <asm/sections.h>
@@ -36,8 +37,10 @@ void register_misc_dump(void)
 
 	if (MSM_DUMP_MAJOR(msm_dump_table_version()) > 1) {
 		misc_data = kzalloc(sizeof(struct msm_dump_data), GFP_KERNEL);
-		if (!misc_data)
-			return;
+		if (!misc_data) {
+			pr_err("rpm dump data structure allocation failed\n");
+ 			return;
+		}	
 		misc_buf = kzalloc(MISC_DUMP_DATA_LEN, GFP_KERNEL);
 		if (!misc_buf)
 			goto err0;
@@ -138,8 +141,10 @@ void register_rpm_dump(void)
 
 	if (MSM_DUMP_MAJOR(msm_dump_table_version()) > 1) {
 		dump_data = kzalloc(sizeof(struct msm_dump_data), GFP_KERNEL);
-		if (!dump_data)
+		if (!dump_data) {
+			pr_err("rpm dump data structure allocation failed\n");
 			return;
+		}
 		dump_addr = kzalloc(RPM_DUMP_DATA_LEN, GFP_KERNEL);
 		if (!dump_addr)
 			goto err0;
@@ -255,6 +260,32 @@ static void __init register_kernel_sections(void)
 			pr_err("Failed to add percpu sections in Minidump\n");
 	}
 }
+
+#ifdef CONFIG_QCOM_MINIDUMP
+void dump_stack_minidump(u64 sp)
+{
+	struct md_region ksp_entry, ktsk_entry;
+	u32 cpu = smp_processor_id();
+
+	if (sp < KIMAGE_VADDR || sp > -256UL)
+		sp = current_stack_pointer;
+
+	sp &= ~(THREAD_SIZE - 1);
+	scnprintf(ksp_entry.name, sizeof(ksp_entry.name), "KSTACK%d", cpu);
+	ksp_entry.virt_addr = sp;
+	ksp_entry.phys_addr = virt_to_phys((uintptr_t *)sp);
+	ksp_entry.size = THREAD_SIZE;
+	if (msm_minidump_add_region(&ksp_entry))
+		pr_err("Failed to add stack of cpu %d in Minidump\n", cpu);
+
+	scnprintf(ktsk_entry.name, sizeof(ktsk_entry.name), "KTASK%d", cpu);
+	ktsk_entry.virt_addr = (u64)current;
+	ktsk_entry.phys_addr = virt_to_phys((uintptr_t *)current);
+	ktsk_entry.size = sizeof(struct task_struct);
+	if (msm_minidump_add_region(&ktsk_entry))
+		pr_err("Failed to add current task %d in Minidump\n", cpu);
+}
+#endif
 
 static void __init async_common_log_init(void *data, async_cookie_t cookie)
 {

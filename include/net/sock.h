@@ -451,6 +451,16 @@ struct sock {
 	u32			sk_classid;
 #endif
 	struct cg_proto		*sk_cgrp;
+    /* START_OF_KNOX_NPA */
+	uid_t           knox_uid;
+    pid_t           knox_pid;
+    uid_t	    	knox_dns_uid;
+    __be32	    	sk_udp_daddr_v6[4];
+    __be32	    	sk_udp_saddr_v6[4];
+    __be16          sk_udp_dport;
+    __be16          sk_udp_sport;
+    char 			domain_name[255];
+    /* END_OF_KNOX_NPA */
 	void			(*sk_state_change)(struct sock *sk);
 	void			(*sk_data_ready)(struct sock *sk);
 	void			(*sk_write_space)(struct sock *sk);

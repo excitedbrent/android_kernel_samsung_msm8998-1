@@ -28,6 +28,11 @@
 
 #define to_mmc_driver(d)	container_of(d, struct mmc_driver, drv)
 
+#ifdef CONFIG_MMC_SUPPORT_STLOG
+#include <linux/stlog.h>
+#else
+#define ST_LOG(fmt,...)
+#endif
 static ssize_t type_show(struct device *dev,
 	struct device_attribute *attr, char *buf)
 {
@@ -381,6 +386,14 @@ int mmc_add_card(struct mmc_card *card)
 			(mmc_card_hs200(card) ? "HS200 " : ""),
 			mmc_card_ddr52(card) ? "DDR " : "",
 			uhs_bus_speed_mode, type, card->rca);
+		ST_LOG("%s: %s%s%s%s(clk %u) %s card\n",
+			mmc_hostname(card->host),
+			mmc_card_uhs(card) ? "ultra high speed " :
+			(mmc_card_hs(card) ? "high speed " : ""),
+			mmc_card_hs400(card) ? "HS400 " :
+			(mmc_card_hs200(card) ? "HS200 " : ""),
+			mmc_card_ddr52(card) ? "DDR " : "",
+			uhs_bus_speed_mode, card->host->ios.clock, type);
 	}
 
 #ifdef CONFIG_DEBUG_FS
@@ -401,6 +414,7 @@ int mmc_add_card(struct mmc_card *card)
 		return ret;
 
 	mmc_card_set_present(card);
+	device_enable_async_suspend(&card->dev);
 
 	return 0;
 }
@@ -422,6 +436,8 @@ void mmc_remove_card(struct mmc_card *card)
 		} else {
 			pr_info("%s: card %04x removed\n",
 				mmc_hostname(card->host), card->rca);
+			ST_LOG("<%s> %s: card %04x removed\n", 
+				__func__,mmc_hostname(card->host), card->rca);
 		}
 		device_del(&card->dev);
 		of_node_put(card->dev.of_node);

@@ -133,11 +133,14 @@ static int qti_ice_setting_config(struct request *req,
 		memcpy(&setting->crypto_data, crypto_data,
 				sizeof(setting->crypto_data));
 
-		if (rq_data_dir(req) == WRITE)
+		if (unlikely(req->cmd_flags & REQ_BYPASS)) {
+			setting->encr_bypass = true;
+			setting->decr_bypass = true;
+		} else if (rq_data_dir(req) == WRITE) {
 			setting->encr_bypass = false;
-		else if (rq_data_dir(req) == READ)
+		} else if (rq_data_dir(req) == READ) {
 			setting->decr_bypass = false;
-		else {
+		} else {
 			/* Should I say BUG_ON */
 			setting->encr_bypass = true;
 			setting->decr_bypass = true;
@@ -869,7 +872,7 @@ static int qcom_ice_restore_key_config(struct ice_device *ice_dev)
 static int qcom_ice_init_clocks(struct ice_device *ice)
 {
 	int ret = -EINVAL;
-	struct ice_clk_info *clki;
+	struct ice_clk_info *clki = NULL;
 	struct device *dev = ice->pdev;
 	struct list_head *head = &ice->clk_list_head;
 
@@ -913,7 +916,7 @@ out:
 static int qcom_ice_enable_clocks(struct ice_device *ice, bool enable)
 {
 	int ret = 0;
-	struct ice_clk_info *clki;
+	struct ice_clk_info *clki = NULL;
 	struct device *dev = ice->pdev;
 	struct list_head *head = &ice->clk_list_head;
 
@@ -1140,7 +1143,6 @@ static int qcom_ice_finish_power_collapse(struct ice_device *ice_dev)
 				err = -EFAULT;
 				goto out;
 			}
-
 		/*
 		 * ICE looses its key configuration when UFS is reset,
 		 * restore it
@@ -1590,12 +1592,14 @@ struct platform_device *qcom_ice_get_pdevice(struct device_node *node)
 		if (ice_dev->pdev->of_node == node) {
 			pr_info("%s: found ice device %pK\n", __func__,
 			ice_dev);
+			ice_pdev = to_platform_device(ice_dev->pdev);
 			break;
 		}
 	}
 
-	ice_pdev = to_platform_device(ice_dev->pdev);
-	pr_info("%s: matching platform device %pK\n", __func__, ice_pdev);
+	if (ice_pdev)
+		pr_info("%s: matching platform device %pK\n", __func__,
+			ice_pdev);
 out:
 	return ice_pdev;
 }
@@ -1615,11 +1619,11 @@ static struct ice_device *get_ice_device_from_storage_type
 		if (!strcmp(ice_dev->ice_instance_type, storage_type)) {
 			pr_debug("%s: found ice device %pK\n",
 				__func__, ice_dev);
-			break;
+			return ice_dev;
 		}
 	}
 out:
-	return ice_dev;
+	return NULL;
 }
 
 static int enable_ice_setup(struct ice_device *ice_dev)

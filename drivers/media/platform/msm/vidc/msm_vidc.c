@@ -533,10 +533,17 @@ static inline void save_v4l2_buffer(struct v4l2_buffer *b,
 
 static int __map_and_update_binfo(struct msm_vidc_inst *inst,
 					struct buffer_info *binfo,
-					struct v4l2_buffer *b, int i)
+					struct v4l2_buffer *b, u32 i)
 {
 	int rc = 0;
 	struct msm_smem *same_fd_handle = NULL;
+
+	if (i >= VIDEO_MAX_PLANES) {
+		dprintk(VIDC_ERR, "Num planes exceeds max: %d, %d\n",
+			i, VIDEO_MAX_PLANES);
+		rc = -EINVAL;
+		goto exit;
+	}
 
 	same_fd_handle = get_same_fd_buffer(
 			inst, b->m.planes[i].reserved[0]);
@@ -558,6 +565,7 @@ static int __map_and_update_binfo(struct msm_vidc_inst *inst,
 		b->m.planes[i].m.userptr = binfo->device_addr[i];
 	}
 
+exit:
 	return rc;
 }
 
@@ -565,7 +573,8 @@ static int __handle_fw_referenced_buffers(struct msm_vidc_inst *inst,
 					struct buffer_info *binfo,
 					struct v4l2_buffer *b)
 {
-	int i = 0, rc = 0;
+	int rc = 0;
+	u32 i = 0;
 
 	if (EXTRADATA_IDX(b->length)) {
 		i = EXTRADATA_IDX(b->length);
@@ -583,8 +592,8 @@ int map_and_register_buf(struct msm_vidc_inst *inst, struct v4l2_buffer *b)
 {
 	struct buffer_info *binfo = NULL;
 	struct buffer_info *temp = NULL, *iterator = NULL;
-	int plane = 0;
-	int i = 0, rc = 0;
+	int plane = 0, rc = 0;
+	u32 i = 0;
 
 	if (!b || !inst) {
 		dprintk(VIDC_ERR, "%s: invalid input\n", __func__);
@@ -1189,6 +1198,8 @@ int msm_vidc_enum_framesizes(void *instance, struct v4l2_frmsizeenum *fsize)
 {
 	struct msm_vidc_inst *inst = instance;
 	struct msm_vidc_capability *capability = NULL;
+	enum hal_video_codec codec;
+	int i;
 
 	if (!inst || !fsize) {
 		dprintk(VIDC_ERR, "%s: invalid parameter: %pK %pK\n",
@@ -1197,15 +1208,33 @@ int msm_vidc_enum_framesizes(void *instance, struct v4l2_frmsizeenum *fsize)
 	}
 	if (!inst->core)
 		return -EINVAL;
+	if (fsize->index != 0)
+		return -EINVAL;
 
-	capability = &inst->capability;
-	fsize->type = V4L2_FRMSIZE_TYPE_STEPWISE;
-	fsize->stepwise.min_width = capability->width.min;
-	fsize->stepwise.max_width = capability->width.max;
-	fsize->stepwise.step_width = capability->width.step_size;
-	fsize->stepwise.min_height = capability->height.min;
-	fsize->stepwise.max_height = capability->height.max;
-	fsize->stepwise.step_height = capability->height.step_size;
+	codec = get_hal_codec(fsize->pixel_format);
+	if (codec == HAL_UNUSED_CODEC)
+		return -EINVAL;
+
+	for (i = 0; i < VIDC_MAX_SESSIONS; i++) {
+		if (inst->core->capabilities[i].codec == codec) {
+			capability = &inst->core->capabilities[i];
+			break;
+		}
+	}
+
+	if (capability) {
+		fsize->type = V4L2_FRMSIZE_TYPE_STEPWISE;
+		fsize->stepwise.min_width = capability->width.min;
+		fsize->stepwise.max_width = capability->width.max;
+		fsize->stepwise.step_width = capability->width.step_size;
+		fsize->stepwise.min_height = capability->height.min;
+		fsize->stepwise.max_height = capability->height.max;
+		fsize->stepwise.step_height = capability->height.step_size;
+	} else {
+		dprintk(VIDC_ERR, "%s: Invalid Pixel Fmt %#x\n",
+				__func__, fsize->pixel_format);
+		return -EINVAL;
+	}
 	return 0;
 }
 EXPORT_SYMBOL(msm_vidc_enum_framesizes);

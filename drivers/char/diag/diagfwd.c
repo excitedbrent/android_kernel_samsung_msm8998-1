@@ -280,7 +280,7 @@ static void pack_rsp_and_send(unsigned char *buf, int len,
 	 * means we did not get a write complete for the previous
 	 * response.
 	 */
-	while (retry_count < UINT_MAX) {
+	while (retry_count < DIAG_MAX_RSP_WAIT_CNT) {
 		if (!driver->rsp_buf_busy)
 			break;
 		/*
@@ -364,7 +364,7 @@ static void encode_rsp_and_send(unsigned char *buf, int len,
 	 * means we did not get a write complete for the previous
 	 * response.
 	 */
-	while (retry_count < UINT_MAX) {
+	while (retry_count < DIAG_MAX_RSP_WAIT_CNT) {
 		if (!driver->rsp_buf_busy)
 			break;
 		/*
@@ -462,7 +462,9 @@ void diag_update_pkt_buffer(unsigned char *buf, uint32_t len, int type)
 		return;
 	}
 
+	DIAG_LOG(DIAG_DEBUG_PERIPHERALS,"Waiting for diagchar_mutex\n");
 	mutex_lock(&driver->diagchar_mutex);
+	DIAG_LOG(DIAG_DEBUG_PERIPHERALS,"Taken diagchar_mutex\n");
 	if (CHK_OVERFLOW(ptr, ptr, ptr + max_len, len)) {
 		memcpy(ptr, temp , len);
 		*length = len;
@@ -472,25 +474,31 @@ void diag_update_pkt_buffer(unsigned char *buf, uint32_t len, int type)
 			 __func__, len, type);
 	}
 	mutex_unlock(&driver->diagchar_mutex);
+	DIAG_LOG(DIAG_DEBUG_PERIPHERALS,"Released diagchar_mutex\n");
 }
 
 void diag_update_userspace_clients(unsigned int type)
 {
 	int i;
 
+	DIAG_LOG(DIAG_DEBUG_PERIPHERALS,"Waiting for diagchar_mutex\n");
 	mutex_lock(&driver->diagchar_mutex);
+	DIAG_LOG(DIAG_DEBUG_PERIPHERALS,"Taken diagchar_mutex\n");
 	for (i = 0; i < driver->num_clients; i++)
 		if (driver->client_map[i].pid != 0)
 			driver->data_ready[i] |= type;
 	wake_up_interruptible(&driver->wait_q);
 	mutex_unlock(&driver->diagchar_mutex);
+	DIAG_LOG(DIAG_DEBUG_PERIPHERALS,"Released diagchar_mutex\n");
 }
 
 void diag_update_md_clients(unsigned int type)
 {
 	int i, j;
 
+	DIAG_LOG(DIAG_DEBUG_PERIPHERALS,"Waiting for diagchar_mutex\n");
 	mutex_lock(&driver->diagchar_mutex);
+	DIAG_LOG(DIAG_DEBUG_PERIPHERALS,"Taken diagchar_mutex\n");
 	for (i = 0; i < NUM_MD_SESSIONS; i++) {
 		if (driver->md_session_map[i] != NULL)
 			for (j = 0; j < driver->num_clients; j++) {
@@ -504,12 +512,15 @@ void diag_update_md_clients(unsigned int type)
 	}
 	wake_up_interruptible(&driver->wait_q);
 	mutex_unlock(&driver->diagchar_mutex);
+	DIAG_LOG(DIAG_DEBUG_PERIPHERALS,"Released diagchar_mutex\n");
 }
 void diag_update_sleeping_process(int process_id, int data_type)
 {
 	int i;
 
+	DIAG_LOG(DIAG_DEBUG_PERIPHERALS,"Waiting for diagchar_mutex\n");
 	mutex_lock(&driver->diagchar_mutex);
+	DIAG_LOG(DIAG_DEBUG_PERIPHERALS,"Taken diagchar_mutex\n");
 	for (i = 0; i < driver->num_clients; i++)
 		if (driver->client_map[i].pid == process_id) {
 			driver->data_ready[i] |= data_type;
@@ -517,6 +528,7 @@ void diag_update_sleeping_process(int process_id, int data_type)
 		}
 	wake_up_interruptible(&driver->wait_q);
 	mutex_unlock(&driver->diagchar_mutex);
+	DIAG_LOG(DIAG_DEBUG_PERIPHERALS,"Released diagchar_mutex\n");
 }
 
 static int diag_send_data(struct diag_cmd_reg_t *entry, unsigned char *buf,

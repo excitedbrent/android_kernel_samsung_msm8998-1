@@ -55,6 +55,9 @@
 #include <trace/events/timer.h>
 
 #include "tick-internal.h"
+#ifdef CONFIG_SEC_DEBUG
+#include <linux/qcom/sec_debug.h>
+#endif
 
 /*
  * The timer bases:
@@ -669,7 +672,9 @@ static void hrtimer_reprogram(struct hrtimer *timer,
 static inline void hrtimer_init_hres(struct hrtimer_cpu_base *base)
 {
 	base->expires_next.tv64 = KTIME_MAX;
+	base->hang_detected = 0;
 	base->hres_active = 0;
+	base->next_timer = NULL;
 }
 
 /*
@@ -1222,7 +1227,13 @@ static void __run_hrtimer(struct hrtimer_cpu_base *cpu_base,
 	 */
 	raw_spin_unlock(&cpu_base->lock);
 	trace_hrtimer_expire_entry(timer, now);
+#ifdef CONFIG_SEC_DEBUG
+	secdbg_msg("hrtimer %pS entry", fn);
+#endif
 	restart = fn(timer);
+#ifdef CONFIG_SEC_DEBUG
+	secdbg_msg("hrtimer %pS exit", fn);
+#endif
 	trace_hrtimer_expire_exit(timer);
 	raw_spin_lock(&cpu_base->lock);
 
@@ -1586,7 +1597,7 @@ static void init_hrtimers_cpu(int cpu)
 		cpu_base->clock_base[i].cpu_base = cpu_base;
 		timerqueue_init_head(&cpu_base->clock_base[i].active);
 	}
-
+	cpu_base->active_bases = 0;
 	cpu_base->cpu = cpu;
 	hrtimer_init_hres(cpu_base);
 }

@@ -44,6 +44,7 @@
 #include <soc/qcom/scm.h>
 
 #include <trace/events/exception.h>
+#include <linux/qcom/sec_debug.h>
 
 static const char *fault_name(unsigned int esr);
 
@@ -80,9 +81,14 @@ void show_pte(struct mm_struct *mm, unsigned long addr)
 		mm = &init_mm;
 
 	pr_alert("pgd = %p\n", mm->pgd);
+
+	sec_debug_store_pte((unsigned long)mm->pgd, 0);
+
 	pgd = pgd_offset(mm, addr);
 	pr_alert("[%08lx] *pgd=%016llx", addr, pgd_val(*pgd));
 
+	sec_debug_store_pte((unsigned long)addr, 1);
+	sec_debug_store_pte((unsigned long)pgd_val(*pgd), 2);
 	do {
 		pud_t *pud;
 		pmd_t *pmd;
@@ -93,16 +99,19 @@ void show_pte(struct mm_struct *mm, unsigned long addr)
 
 		pud = pud_offset(pgd, addr);
 		printk(", *pud=%016llx", pud_val(*pud));
+		sec_debug_store_pte((unsigned long)pud_val(*pud), 3);
 		if (pud_none(*pud) || pud_bad(*pud))
 			break;
 
 		pmd = pmd_offset(pud, addr);
 		printk(", *pmd=%016llx", pmd_val(*pmd));
+		sec_debug_store_pte((unsigned long)pmd_val(*pmd), 4);
 		if (pmd_none(*pmd) || pmd_bad(*pmd))
 			break;
 
 		pte = pte_offset_map(pmd, addr);
 		printk(", *pte=%016llx", pte_val(*pte));
+		sec_debug_store_pte((unsigned long)pte_val(*pte), 5);
 		pte_unmap(pte);
 	} while(0);
 
@@ -181,6 +190,9 @@ static void __do_kernel_fault(struct mm_struct *mm, unsigned long addr,
 	 * No handler, we'll have to terminate things with extreme prejudice.
 	 */
 	bust_spinlocks(1);
+
+	sec_debug_store_extc_idx(false);
+
 	pr_alert("Unable to handle kernel %s at virtual address %08lx\n",
 		 (addr < PAGE_SIZE) ? "NULL pointer dereference" :
 		 "paging request", addr);
@@ -593,6 +605,8 @@ asmlinkage void __exception do_mem_abort(unsigned long addr, unsigned int esr,
 	const struct fault_info *inf = fault_info + (esr & 63);
 	struct siginfo info;
 
+	sec_debug_save_fault_info(esr, inf->name, addr, 0UL);
+
 	if (!inf->fn(addr, esr, regs))
 		return;
 
@@ -604,6 +618,22 @@ asmlinkage void __exception do_mem_abort(unsigned long addr, unsigned int esr,
 	info.si_code  = inf->code;
 	info.si_addr  = (void __user *)addr;
 	arm64_notify_die("", regs, &info, esr);
+}
+
+asmlinkage void __exception do_el0_ia_bp_hardening(unsigned long addr,
+						   unsigned int esr,
+						   struct pt_regs *regs)
+{
+	/*
+	 * We've taken an instruction abort from userspace and not yet
+	 * re-enabled IRQs. If the address is a kernel address, apply
+	 * BP hardening prior to enabling IRQs and pre-emption.
+	 */
+	if (addr > TASK_SIZE)
+		arm64_apply_bp_hardening();
+
+	local_irq_enable();
+	do_mem_abort(addr, esr, regs);
 }
 
 /*
@@ -621,6 +651,9 @@ asmlinkage void __exception do_sp_pc_abort(unsigned long addr,
 				    tsk->comm, task_pid_nr(tsk),
 				    esr_get_class_string(esr), (void *)regs->pc,
 				    (void *)regs->sp);
+
+	sec_debug_save_fault_info(esr, esr_get_class_string(esr),
+			(unsigned long)regs->pc, (unsigned long)regs->sp);
 
 	info.si_signo = SIGBUS;
 	info.si_errno = 0;
@@ -666,6 +699,8 @@ asmlinkage int __exception do_debug_exception(unsigned long addr,
 {
 	const struct fault_info *inf = debug_fault_info + DBG_ESR_EVT(esr);
 	struct siginfo info;
+
+	sec_debug_save_fault_info(esr, inf->name, addr, 0UL);
 
 	if (!inf->fn(addr, esr, regs))
 		return 1;

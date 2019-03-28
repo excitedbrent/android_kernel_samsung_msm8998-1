@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2017, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2018, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -27,6 +27,9 @@
 #include "mdss_mdp.h"
 #include "mdss_mdp_trace.h"
 #include "mdss_debug.h"
+#if defined(CONFIG_FB_MSM_MDSS_SAMSUNG)
+#include "samsung/ss_dsi_panel_common.h"
+#endif
 
 #define MDSS_MDP_QSEED3_VER_DOWNSCALE_LIM 2
 #define NUM_MIXERCFG_REGS 3
@@ -3275,6 +3278,7 @@ static void __dsc_setup_dual_lm_single_display(struct mdss_mdp_ctl *ctl,
 	}
 
 	mdss_panel_dsc_update_pic_dim(dsc, pic_width, pic_height);
+	MDSS_XLOG(dsc->pic_height, dsc->pic_width);
 
 	intf_ip_w = this_frame_slices * dsc->slice_width;
 	mdss_panel_dsc_pclk_param_calc(dsc, intf_ip_w);
@@ -4263,13 +4267,26 @@ static void mdss_mdp_ctl_restore_sub(struct mdss_mdp_ctl *ctl)
 {
 	u32 temp;
 	int ret = 0;
-
+#if defined(CONFIG_FB_MSM_MDSS_SAMSUNG)
+	struct mdss_dsi_ctrl_pdata *ctrl_pdata;
+#endif
 	temp = readl_relaxed(ctl->mdata->mdp_base +
 			MDSS_MDP_REG_DISP_INTF_SEL);
 	temp |= (ctl->intf_type << ((ctl->intf_num - MDSS_MDP_INTF0) * 8));
 	writel_relaxed(temp, ctl->mdata->mdp_base +
 			MDSS_MDP_REG_DISP_INTF_SEL);
 
+#if defined(CONFIG_FB_MSM_MDSS_SAMSUNG)
+	// Select primary vsync gpio
+	// 0x : Vsync primary(GPIO_10)
+	// 0x2200 : Vsync external(GPIO_12)
+
+	ctrl_pdata = container_of(ctl->panel_data, struct mdss_dsi_ctrl_pdata, panel_data);
+	if (ctrl_pdata->disp_te_gpio == 12) {
+		// ex) Dream project used primary vsync gpio as a GPIO_12.
+		writel_relaxed(0x02200, ctl->mdata->mdp_base +	MDSS_MDP_REG_VSYNC_SEL);
+	}
+#endif
 	if (ctl->mfd && ctl->panel_data) {
 		ctl->mfd->ipc_resume = true;
 		mdss_mdp_pp_resume(ctl->mfd);
@@ -4344,6 +4361,9 @@ static int mdss_mdp_ctl_start_sub(struct mdss_mdp_ctl *ctl, bool handoff)
 	u32 outsize, temp;
 	int ret = 0;
 	int i, nmixers;
+#if defined(CONFIG_FB_MSM_MDSS_SAMSUNG)
+	struct mdss_dsi_ctrl_pdata *ctrl_pdata;
+#endif
 
 	pr_debug("ctl_num=%d\n", ctl->num);
 
@@ -4382,6 +4402,17 @@ static int mdss_mdp_ctl_start_sub(struct mdss_mdp_ctl *ctl, bool handoff)
 	writel_relaxed(temp, ctl->mdata->mdp_base +
 		MDSS_MDP_REG_DISP_INTF_SEL);
 
+#if defined(CONFIG_FB_MSM_MDSS_SAMSUNG)
+	// Select primary vsync gpio
+	// 0x : Vsync primary(GPIO_10)
+	// 0x2200 : Vsync external(GPIO_12)
+
+	ctrl_pdata = container_of(ctl->panel_data, struct mdss_dsi_ctrl_pdata, panel_data);
+	if (ctrl_pdata->disp_te_gpio == 12) {
+		// ex) Dream project used primary vsync gpio as a GPIO_12.
+		writel_relaxed(0x02200, ctl->mdata->mdp_base +	MDSS_MDP_REG_VSYNC_SEL);
+	}
+#endif
 	mixer = ctl->mixer_left;
 	if (mixer) {
 		struct mdss_panel_info *pinfo = &ctl->panel_data->panel_info;
@@ -5912,9 +5943,7 @@ int mdss_mdp_display_commit(struct mdss_mdp_ctl *ctl, void *arg,
 		} else {
 			sctl_flush_bits = sctl->flush_bits;
 		}
-		sctl->commit_in_progress = true;
 	}
-	ctl->commit_in_progress = true;
 	ctl_flush_bits = ctl->flush_bits;
 
 	ATRACE_END("postproc_programming");
@@ -5928,6 +5957,9 @@ int mdss_mdp_display_commit(struct mdss_mdp_ctl *ctl, void *arg,
 			MDP_COMMIT_STAGE_SETUP_DONE,
 			commit_cb->data);
 	ret = mdss_mdp_ctl_notify(ctl, MDP_NOTIFY_FRAME_READY);
+	ctl->commit_in_progress = true;
+	if (sctl)
+		sctl->commit_in_progress = true;
 
 	/*
 	 * When wait for fence timed out, driver ignores the fences

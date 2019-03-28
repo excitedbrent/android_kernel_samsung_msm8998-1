@@ -2712,7 +2712,6 @@ int mdss_dsi_pre_clkon_cb(void *priv,
 					false;
 				ctrl->core_power = true;
 			}
-
 		}
 	}
 

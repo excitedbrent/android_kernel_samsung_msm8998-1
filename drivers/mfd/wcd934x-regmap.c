@@ -1893,6 +1893,10 @@ static bool wcd934x_is_volatile_register(struct device *dev, unsigned int reg)
 
 	/* IIR Coeff registers are not cacheable */
 	if ((reg >= WCD934X_CDC_SIDETONE_IIR0_IIR_COEF_B1_CTL) &&
+	    (reg <= WCD934X_CDC_SIDETONE_IIR0_IIR_COEF_B2_CTL))
+		return true;
+
+	if ((reg >= WCD934X_CDC_SIDETONE_IIR1_IIR_COEF_B1_CTL) &&
 	    (reg <= WCD934X_CDC_SIDETONE_IIR1_IIR_COEF_B2_CTL))
 		return true;
 
@@ -1932,12 +1936,11 @@ static bool wcd934x_is_volatile_register(struct device *dev, unsigned int reg)
 	case WCD934X_ANA_BIAS:
 	case WCD934X_ANA_BUCK_CTL:
 	case WCD934X_ANA_RCO:
-	case WCD934X_CDC_CLK_RST_CTRL_MCLK_CONTROL:
 	case WCD934X_CODEC_RPM_CLK_GATE:
 	case WCD934X_BIAS_VBG_FINE_ADJ:
 	case WCD934X_CODEC_CPR_SVS_CX_VDD:
 	case WCD934X_CODEC_CPR_SVS2_CX_VDD:
-	case WCD934X_CDC_CLK_RST_CTRL_FS_CNT_CONTROL:
+	case WCD934X_CPE_SS_BACKUP_INT:
 		return true;
 	}
 

@@ -29,6 +29,20 @@
 #include "mdss.h"
 #include "mdss_panel.h"
 
+#ifdef CONFIG_SEC_DISPLAYPORT
+#include <linux/usb/manager/usb_typec_manager_notifier.h>
+/*#define SECDP_PHY_TEST*/				/* for RE TEST */
+/*#define SECDP_PHY_AUTO_TEST*/			/* for PHY AUTOMATION TEST */
+#define SECDP_LIMIT_REAUTH				/* limit max HDCP reauth */
+#define SECDP_MAX_REAUTH_COUNT	100
+/*#define SECDP_BLOCK_DFP_VGA*/			/* block VGA dongle support */
+#define SECDP_AUX_RETRY					/* aux retry */
+
+#define DPCD_BRANCH_HW_REVISION    0x509
+#define DPCD_BRANCH_SW_REVISION_MAJOR    0x50A
+#define DPCD_BRANCH_SW_REVISION_MINOR    0x50B
+#endif
+
 #define dp_read(offset) readl_relaxed((offset))
 #define dp_write(offset, data) writel_relaxed((data), (offset))
 
@@ -140,6 +154,7 @@ enum dp_pm_type {
 #define DP_VDM_STATUS		0x10
 #define DP_VDM_CONFIGURE	0x11
 
+#ifndef CONFIG_SEC_DISPLAYPORT
 enum dp_port_cap {
 	PORT_NONE = 0,
 	PORT_UFP_D,
@@ -182,6 +197,7 @@ struct dp_alt_mode {
 	u32 usbpd_dp_config;
 	enum dp_alt_mode_state current_state;
 };
+#endif
 
 #define DPCD_ENHANCED_FRAME	BIT(0)
 #define DPCD_TPS3	BIT(1)
@@ -207,14 +223,18 @@ struct dp_alt_mode {
 #define EV_USBPD_EXIT_MODE		BIT(12)
 #define EV_USBPD_ATTENTION		BIT(13)
 
+#ifdef CONFIG_SEC_DISPLAYPORT
+#define EV_DP_OFF_HPD			BIT(14)
+#endif
+
 /* dp state ctrl */
-#define ST_TRAIN_PATTERN_1		BIT(0)
+#define ST_TRAIN_PATTERN_1		BIT(0)		/* D10.2 without scrambling */
 #define ST_TRAIN_PATTERN_2		BIT(1)
 #define ST_TRAIN_PATTERN_3		BIT(2)
-#define ST_TRAIN_PATTERN_4		BIT(3)
+#define ST_TRAIN_PATTERN_4		BIT(3)		/* HBR2 Compliance EYE pattern */
 #define ST_SYMBOL_ERR_RATE_MEASUREMENT	BIT(4)
 #define ST_PRBS7			BIT(5)
-#define ST_CUSTOM_80_BIT_PATTERN	BIT(6)
+#define ST_CUSTOM_80_BIT_PATTERN	BIT(6)	/* 80 bit custom pattern transmitted */
 #define ST_SEND_VIDEO			BIT(7)
 #define ST_PUSH_IDLE			BIT(8)
 
@@ -265,6 +285,16 @@ struct downstream_port_config {
 	bool msa_timing_par_ignored;
 	bool oui_support;
 };
+
+#ifdef SECDP_PHY_TEST
+struct secdp_phy_param_st {
+	char v_level;		/* amplitude 0,1,2,3 */
+	char p_level;		/* pre-emphasis 0,1,2,3 */
+	char link_rate;		/* 6,10,20 */
+	char lane_cnt;		/* 4, fixed */
+	int pattern;		/* 0,1,2,..,7 */
+};
+#endif
 
 #define DP_MAX_DS_PORT_COUNT 2
 
@@ -373,6 +403,10 @@ struct edp_edid {
 	char hsync_pol;		/* 0 = negative, 1 = positive */
 	char ext_block_cnt;
 	struct display_timing_desc timing[4];
+
+#ifdef CONFIG_SEC_DISPLAYPORT
+	u32 id_serial_number;
+#endif
 };
 
 struct dp_statistic {
@@ -558,11 +592,33 @@ struct mdss_dp_drv_pdata {
 	struct platform_device *pdev;
 	struct platform_device *ext_pdev;
 
+#ifndef CONFIG_SEC_DISPLAYPORT
 	struct usbpd *pd;
 	enum plug_orientation orientation;
 	struct dp_hdcp hdcp;
 	struct usbpd_svid_handler svid_handler;
 	struct dp_alt_mode alt_mode;
+#else
+	enum plug_orientation orientation;
+	struct notifier_block dp_typec_nb;
+	struct delayed_work dp_noti_register;
+	bool notifier_registered;
+	struct dp_hdcp hdcp;
+	int dex_reconnecting;
+	int aux_status;
+	int link_train_status;
+	bool is_dex_supported;
+#ifdef SECDP_LIMIT_REAUTH
+	int reauth_count;
+#endif
+#ifdef SECDP_AUX_RETRY
+	int aux_tuning_value[4];
+	int aux_tuning_index;
+#endif
+#endif
+#ifdef SECDP_PHY_TEST
+	struct secdp_phy_param_st *secdp_phy_param;
+#endif
 	bool dp_initialized;
 	struct msm_ext_disp_init_data ext_audio_data;
 
@@ -618,6 +674,8 @@ struct mdss_dp_drv_pdata {
 	/* DP Pixel clock RCG and PLL parent */
 	struct clk *pixel_clk_rcg;
 	struct clk *pixel_parent;
+	struct clk *pixel_clk_two_div;
+	struct clk *pixel_clk_four_div;
 
 	/* regulators */
 	struct dss_module_power power_data[DP_MAX_PM];
@@ -639,11 +697,29 @@ struct mdss_dp_drv_pdata {
 	struct completion idle_comp;
 	struct completion video_comp;
 	struct completion notification_comp;
+	struct completion irq_comp;
+#ifdef CONFIG_SEC_DISPLAYPORT
+	struct completion dp_off_comp;
+#endif
 	struct mutex aux_mutex;
 	struct mutex train_mutex;
 	struct mutex attention_lock;
+#ifdef CONFIG_SEC_DISPLAYPORT
+	struct mutex pd_msg_mutex;
+#endif
 	struct mutex hdcp_mutex;
-	bool cable_connected;
+	bool cable_connected;			/* hpd, see "dp_get_cable_status()" */
+#ifdef CONFIG_SEC_DISPLAYPORT
+	bool cable_connected_phy;		/* real cable connect/disconnect */
+	int dex_now;			/* 1 if dex is running, 0 otherwise */
+	int dex_en;				/* 1 if dex starts, 0 otherwise */
+	int dex_set;			/* 1 if "hdmi mode" is dex, 0 otherwise */
+	char dex_fw_ver[10];	/* 0: h/w, 1: s/w major, 2: s/w minor */
+	int dp_pin_type;
+	bool sec_link_conf;
+	bool sec_hpd;
+	CC_NOTI_TYPEDEF sec_hpd_noti;
+#endif
 	u32 s3d_mode;
 	u32 aux_cmd_busy;
 	u32 aux_cmd_i2c;
@@ -675,6 +751,10 @@ struct mdss_dp_drv_pdata {
 
 	struct workqueue_struct *workq;
 	struct delayed_work hdcp_cb_work;
+#ifdef CONFIG_SEC_DISPLAYPORT
+	struct delayed_work dp_start_hdcp_work;
+	struct delayed_work dp_reconnection_work;
+#endif
 	spinlock_t lock;
 	struct switch_dev sdev;
 	struct kobject *kobj;
@@ -790,6 +870,12 @@ static inline char *mdss_dp_get_phy_test_pattern(u32 phy_test_pattern_sel)
 		return "unknown";
 	}
 }
+
+#ifdef CONFIG_SEC_DISPLAYPORT
+#define SAMSUNG_VENDOR_ID		0x04E8
+#define DEXDOCK_PRODUCT_ID		0xA020
+/* #define NOT_SUPPORT_DEX_RES_CHANGE */
+#endif
 
 static inline bool mdss_dp_is_phy_test_pattern_supported(
 		u32 phy_test_pattern_sel)
@@ -1201,5 +1287,10 @@ int mdss_dp_aux_read_sink_frame_crc(struct mdss_dp_drv_pdata *dp);
 int mdss_dp_aux_config_sink_frame_crc(struct mdss_dp_drv_pdata *dp,
 	bool enable);
 int mdss_dp_aux_parse_vx_px(struct mdss_dp_drv_pdata *ep);
+#ifdef CONFIG_SEC_DISPLAYPORT
+int secdp_check_aux_status(struct mdss_dp_drv_pdata *dp);
+void secdp_init_aux_control(struct mdss_dp_drv_pdata *dp);
+int secdp_read_link_status(struct mdss_dp_drv_pdata *ep);
+#endif
 
 #endif /* MDSS_DP_H */

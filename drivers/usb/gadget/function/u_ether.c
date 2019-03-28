@@ -451,12 +451,34 @@ static void process_rx_w(struct work_struct *work)
 		if (status < 0
 				|| ETH_HLEN > skb->len
 				|| skb->len > ETH_FRAME_LEN) {
+#ifdef CONFIG_USB_NCM_SUPPORT_MTU_CHANGE
+			/*
+			 * Need to revisit net->mtu  does not include header size incase of changed MTU
+			 */
+			if(!strcmp(dev->port_usb->func.name,"ncm")) {
+				if (status < 0
+					|| ETH_HLEN > skb->len
+					|| skb->len > (dev->net->mtu + ETH_HLEN)) {
+					printk(KERN_ERR "usb: %s  drop incase of NCM rx length %d\n",__func__,skb->len);
+				} else {
+					printk(KERN_ERR "usb: %s  Dont drop incase of NCM rx length %d\n",__func__,skb->len);
+					goto process_frame;
+				}
+			}
+#endif
 			dev->net->stats.rx_errors++;
 			dev->net->stats.rx_length_errors++;
+#ifndef CONFIG_USB_NCM_SUPPORT_MTU_CHANGE
 			DBG(dev, "rx length %d\n", skb->len);
+#else
+			printk(KERN_ERR "usb: %s Drop rx length %d\n",__func__,skb->len);
+#endif
 			dev_kfree_skb_any(skb);
 			continue;
 		}
+#ifdef CONFIG_USB_NCM_SUPPORT_MTU_CHANGE
+process_frame:
+#endif
 		skb->protocol = eth_type_trans(skb, dev->net);
 		dev->net->stats.rx_packets++;
 		dev->net->stats.rx_bytes += skb->len;
@@ -547,7 +569,11 @@ static void tx_complete(struct usb_ep *ep, struct usb_request *req)
 				retval = usb_ep_queue(in, new_req, GFP_ATOMIC);
 				switch (retval) {
 				default:
+#ifndef CONFIG_USB_NCM_SUPPORT_MTU_CHANGE
 					DBG(dev, "tx queue err %d\n", retval);
+#else
+					printk(KERN_ERR"usb:%s tx queue err %d\n",__func__, retval);
+#endif
 					break;
 				case 0:
 					spin_lock(&dev->req_lock);
@@ -946,13 +972,19 @@ struct eth_dev *gether_setup_name(struct usb_gadget *g,
 	if (get_ether_addr(dev_addr, net->dev_addr))
 		dev_warn(&g->dev,
 			"using random %s ethernet address\n", "self");
+#ifdef CONFIG_USB_ANDROID_SAMSUNG_COMPOSITE
+	if (ethaddr != NULL) {
+		memcpy(dev->host_mac, ethaddr, ETH_ALEN);
+		printk(KERN_DEBUG "usb: set unique host mac\n");
+	}
+#else
 	if (get_ether_addr(host_addr, dev->host_mac))
 		dev_warn(&g->dev,
 			"using random %s ethernet address\n", "host");
 
 	if (ethaddr)
 		memcpy(ethaddr, dev->host_mac, ETH_ALEN);
-
+#endif
 	net->netdev_ops = &eth_netdev_ops;
 
 	net->ethtool_ops = &ops;
@@ -1073,6 +1105,9 @@ int gether_set_dev_addr(struct net_device *net, const char *dev_addr)
 	struct eth_dev *dev;
 	u8 new_addr[ETH_ALEN];
 
+	if (!net)
+		return -ENODEV;
+
 	dev = netdev_priv(net);
 	if (get_ether_addr(dev_addr, new_addr))
 		return -EINVAL;
@@ -1085,6 +1120,9 @@ int gether_get_dev_addr(struct net_device *net, char *dev_addr, int len)
 {
 	struct eth_dev *dev;
 
+	if (!net)
+		return -ENODEV;
+
 	dev = netdev_priv(net);
 	return get_ether_addr_str(dev->dev_mac, dev_addr, len);
 }
@@ -1094,6 +1132,9 @@ int gether_set_host_addr(struct net_device *net, const char *host_addr)
 {
 	struct eth_dev *dev;
 	u8 new_addr[ETH_ALEN];
+
+	if (!net)
+		return -ENODEV;
 
 	dev = netdev_priv(net);
 	if (get_ether_addr(host_addr, new_addr))
@@ -1106,6 +1147,9 @@ EXPORT_SYMBOL_GPL(gether_set_host_addr);
 int gether_get_host_addr(struct net_device *net, char *host_addr, int len)
 {
 	struct eth_dev *dev;
+
+	if (!net)
+		return -ENODEV;
 
 	dev = netdev_priv(net);
 	return get_ether_addr_str(dev->host_mac, host_addr, len);
@@ -1120,7 +1164,7 @@ int gether_get_host_addr_cdc(struct net_device *net, char *host_addr, int len)
 		return -EINVAL;
 
 	dev = netdev_priv(net);
-	snprintf(host_addr, len, "%pM", dev->host_mac);
+	snprintf(host_addr, len, "%pm", dev->host_mac);
 
 	return strlen(host_addr);
 }
@@ -1139,6 +1183,9 @@ void gether_set_qmult(struct net_device *net, unsigned qmult)
 {
 	struct eth_dev *dev;
 
+	if (!net)
+		return;
+
 	dev = netdev_priv(net);
 	dev->qmult = qmult;
 }
@@ -1148,6 +1195,9 @@ unsigned gether_get_qmult(struct net_device *net)
 {
 	struct eth_dev *dev;
 
+	if (!net)
+		return -ENODEV;
+
 	dev = netdev_priv(net);
 	return dev->qmult;
 }
@@ -1155,6 +1205,9 @@ EXPORT_SYMBOL_GPL(gether_get_qmult);
 
 int gether_get_ifname(struct net_device *net, char *name, int len)
 {
+	if (!net)
+		return -ENODEV;
+
 	rtnl_lock();
 	strlcpy(name, netdev_name(net), len);
 	rtnl_unlock();

@@ -1,4 +1,4 @@
-/* Copyright (c) 2013-2017, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -500,10 +500,6 @@ static int vfe_probe(struct platform_device *pdev)
 	memset(&vfe_common_data, 0, sizeof(vfe_common_data));
 	mutex_init(&vfe_common_data.vfe_common_mutex);
 	spin_lock_init(&vfe_common_data.common_dev_data_lock);
-	spin_lock_init(&vfe_common_data.vfe_irq_dump.
-			common_dev_irq_dump_lock);
-	spin_lock_init(&vfe_common_data.vfe_irq_dump.
-			common_dev_tasklet_dump_lock);
 	for (i = 0; i < (VFE_AXI_SRC_MAX * MAX_VFE); i++)
 		spin_lock_init(&(vfe_common_data.streams[i].lock));
 	for (i = 0; i < (MSM_ISP_STATS_MAX * MAX_VFE); i++)
@@ -596,12 +592,6 @@ int vfe_hw_probe(struct platform_device *pdev)
 		}
 		vfe_dev->hw_info =
 			(struct msm_vfe_hardware_info *) match_dev->data;
-		/* Cx ipeak support */
-		if (of_find_property(pdev->dev.of_node,
-			"qcom,vfe-cx-ipeak", NULL)) {
-			vfe_dev->vfe_cx_ipeak = cx_ipeak_register(
-				pdev->dev.of_node, "qcom,vfe-cx-ipeak");
-		}
 	} else {
 		vfe_dev->hw_info = (struct msm_vfe_hardware_info *)
 			platform_get_device_id(pdev)->driver_data;
@@ -638,7 +628,6 @@ int vfe_hw_probe(struct platform_device *pdev)
 	spin_lock_init(&vfe_dev->shared_data_lock);
 	spin_lock_init(&vfe_dev->reg_update_lock);
 	spin_lock_init(&req_history_lock);
-	spin_lock_init(&vfe_dev->completion_lock);
 	media_entity_init(&vfe_dev->subdev.sd.entity, 0, NULL, 0);
 	vfe_dev->subdev.sd.entity.type = MEDIA_ENT_T_V4L2_SUBDEV;
 	vfe_dev->subdev.sd.entity.group_id = MSM_CAMERA_SUBDEV_VFE;

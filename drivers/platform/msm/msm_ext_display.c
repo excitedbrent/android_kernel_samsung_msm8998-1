@@ -22,6 +22,21 @@
 #include <linux/switch.h>
 #include <linux/of_platform.h>
 #include <linux/msm_ext_display.h>
+#ifdef CONFIG_SEC_DISPLAYPORT
+#include <linux/dp_logger.h>
+#endif
+
+#ifndef CONFIG_SEC_DISPLAYPORT
+#include "mdss_hdmi_util.h"
+#include "mdss_fb.h"
+#else
+#include "../../video/fbdev/msm/mdss_hdmi_util.h"
+#include "../../video/fbdev/msm/mdss_fb.h"
+#ifdef pr_debug
+#undef pr_debug
+#define pr_debug	pr_info
+#endif
+#endif
 
 struct msm_ext_disp_list {
 	struct msm_ext_disp_init_data *data;
@@ -39,6 +54,13 @@ struct msm_ext_disp {
 	struct list_head display_list;
 	struct mutex lock;
 	struct completion hpd_comp;
+
+#ifdef CONFIG_SEC_DISPLAYPORT
+	int audio_ch;
+#endif
+
+	bool update_audio;
+	u32 flags;
 };
 
 static int msm_ext_disp_get_intf_data(struct msm_ext_disp *ext_disp,
@@ -67,7 +89,11 @@ static int msm_ext_disp_switch_dev_register(struct msm_ext_disp *ext_disp)
 	}
 
 	memset(&ext_disp->audio_sdev, 0x0, sizeof(ext_disp->audio_sdev));
+#ifndef CONFIG_SEC_DISPLAYPORT
 	ext_disp->audio_sdev.name = "hdmi_audio";
+#else
+	ext_disp->audio_sdev.name = "ch_hdmi_audio";
+#endif
 	ret = switch_dev_register(&ext_disp->audio_sdev);
 	if (ret) {
 		pr_err("hdmi_audio switch registration failed");
@@ -112,7 +138,7 @@ static int msm_ext_disp_add_intf_data(struct msm_ext_disp *ext_disp,
 {
 	struct msm_ext_disp_list *node;
 
-	if (!ext_disp && !data) {
+	if (!ext_disp || !data) {
 		pr_err("Invalid params\n");
 		return -EINVAL;
 	}
@@ -191,12 +217,16 @@ static int msm_ext_disp_send_audio_notification(struct msm_ext_disp *ext_disp,
 		enum msm_ext_disp_cable_state new_state)
 {
 	int state = EXT_DISPLAY_CABLE_STATE_MAX;
+#ifdef CONFIG_SEC_DISPLAYPORT
+	int audio_ch;
+#endif
 
 	if (!ext_disp) {
 		pr_err("Invalid params\n");
 		return -EINVAL;
 	}
 
+#ifndef CONFIG_SEC_DISPLAYPORT
 	state = ext_disp->audio_sdev.state;
 	switch_set_state(&ext_disp->audio_sdev, !!new_state);
 
@@ -204,6 +234,12 @@ static int msm_ext_disp_send_audio_notification(struct msm_ext_disp *ext_disp,
 			ext_disp->audio_sdev.state == state ?
 			"is same" : "switched to",
 			ext_disp->audio_sdev.state);
+#else
+	audio_ch = new_state ? ext_disp->audio_ch : -1; 
+	switch_set_state(&ext_disp->audio_sdev, audio_ch);
+
+	pr_info("DP Audio state: 0x%x(%d)\n", audio_ch, audio_ch);
+#endif
 
 	return ext_disp->audio_sdev.state == state ? 0 : 1;
 }
@@ -291,6 +327,7 @@ static bool msm_ext_disp_validate_connect(struct msm_ext_disp *ext_disp,
 	/* if already connected, block a new connection  */
 	if (ext_disp->current_disp != type)
 		return false;
+
 end:
 	return true;
 }
@@ -339,6 +376,8 @@ static int msm_ext_disp_hpd(struct platform_device *pdev,
 		ret = -EINVAL;
 		goto end;
 	}
+
+	ext_disp->flags = flags;
 
 	if (state == EXT_DISPLAY_CABLE_CONNECT) {
 		if (!msm_ext_disp_validate_connect(ext_disp, type, flags)) {
@@ -564,12 +603,30 @@ end:
 	return ret;
 }
 
+#ifdef CONFIG_SEC_DISPLAYPORT
+static void  msm_ext_disp_set_audio_ch(struct platform_device *pdev,
+		int ch)
+{
+	struct msm_ext_disp *ext_disp = NULL;
+
+	if (!pdev) {
+		pr_err("Invalid platform device\n");
+		return;
+	}
+
+	ext_disp = platform_get_drvdata(pdev);
+	ext_disp->audio_ch = ch;
+
+}
+#endif
+
 static int msm_ext_disp_update_audio_ops(struct msm_ext_disp *ext_disp,
 		enum msm_ext_disp_type type,
 		enum msm_ext_disp_cable_state state, u32 flags)
 {
 	int ret = 0;
 	struct msm_ext_disp_audio_codec_ops *ops = ext_disp->ops;
+	ext_disp->update_audio = false;
 
 	if (!(flags & MSM_EXT_DISP_HPD_AUDIO)) {
 		pr_debug("skipping audio ops setup for display (%s)\n",
@@ -579,6 +636,10 @@ static int msm_ext_disp_update_audio_ops(struct msm_ext_disp *ext_disp,
 
 	if (!ops) {
 		pr_err("Invalid audio ops\n");
+		if (state == EXT_DISPLAY_CABLE_CONNECT) {
+			/* update audio ops once audio codec gets registered */
+			ext_disp->update_audio = true;
+		}
 		ret = -EINVAL;
 		goto end;
 	}
@@ -682,6 +743,18 @@ int msm_ext_disp_register_audio_codec(struct platform_device *pdev,
 
 	pr_debug("audio codec registered\n");
 
+	mutex_lock(&ext_disp->lock);
+	if (ext_disp->update_audio) {
+		msm_ext_disp_update_audio_ops(ext_disp, ext_disp->current_disp,
+				EXT_DISPLAY_CABLE_CONNECT, ext_disp->flags);
+
+		msm_ext_disp_process_audio(ext_disp, ext_disp->current_disp,
+				EXT_DISPLAY_CABLE_CONNECT, ext_disp->flags);
+
+		ext_disp->update_audio = false;
+	}
+	mutex_unlock(&ext_disp->lock);
+
 	return ret;
 }
 
@@ -744,6 +817,9 @@ int msm_ext_disp_register_intf(struct platform_device *pdev,
 
 	init_data->intf_ops.hpd = msm_ext_disp_hpd;
 	init_data->intf_ops.notify = msm_ext_disp_notify;
+#ifdef CONFIG_SEC_DISPLAYPORT
+	init_data->intf_ops.set_audio_ch = msm_ext_disp_set_audio_ch;
+#endif
 
 	pr_debug("Display (%s) registered\n",
 			msm_ext_disp_name(init_data->type));
@@ -799,10 +875,11 @@ static int msm_ext_disp_probe(struct platform_device *pdev)
 	}
 
 	mutex_init(&ext_disp->lock);
-
 	INIT_LIST_HEAD(&ext_disp->display_list);
 	init_completion(&ext_disp->hpd_comp);
 	ext_disp->current_disp = EXT_DISPLAY_TYPE_MAX;
+	ext_disp->flags = 0;
+	ext_disp->update_audio = false;
 
 	return ret;
 

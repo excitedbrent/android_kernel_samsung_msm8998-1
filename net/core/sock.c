@@ -653,6 +653,56 @@ out:
 	return ret;
 }
 
+/* START_OF_KNOX_NPA */
+/** The function sets the domain name associated with the socket. **/
+static int sock_set_domain_name(struct sock *sk, char __user *optval,
+                int optlen)
+{
+    int ret = -EADDRNOTAVAIL;
+    char domain[255];
+
+    ret = -EINVAL;
+    if (optlen < 0)
+        goto out;
+
+    if (optlen > 255 - 1)
+        optlen = 255 - 1;
+
+    memset(domain, 0, sizeof(domain));
+
+    ret = -EFAULT;
+    if (copy_from_user(domain, optval, optlen))
+        goto out;
+    if(sk->domain_name[0] == '\0') {
+        memcpy(sk->domain_name,domain, sizeof(sk->domain_name)-1);
+    }
+    ret = 0;
+
+out:
+    return ret;
+}
+
+static int sock_set_dns_uid(struct sock *sk, char __user *optval, int optlen)
+{
+    int ret = -EADDRNOTAVAIL;
+
+    if (optlen < 0)
+		goto out;
+
+    if (optlen == sizeof(uid_t)) {
+		uid_t dns_uid;
+		ret = -EFAULT;
+		if (copy_from_user(&dns_uid, optval, sizeof(dns_uid)))
+		goto out;
+		memcpy(&sk->knox_dns_uid, &dns_uid, sizeof(sk->knox_dns_uid));
+		ret = 0;
+    }
+
+out:
+	return ret;
+}
+/* END_OF_KNOX_NPA */
+
 static inline void sock_valbool_flag(struct sock *sk, int bit, int valbool)
 {
 	if (valbool)
@@ -700,6 +750,13 @@ int sock_setsockopt(struct socket *sock, int level, int optname,
 
 	if (optname == SO_BINDTODEVICE)
 		return sock_setbindtodevice(sk, optval, optlen);
+
+    /* START_OF_KNOX_NPA */
+    if (optname == SO_SET_DOMAIN_NAME)
+        return sock_set_domain_name(sk, optval, optlen);
+    if (optname == SO_SET_DNS_UID)
+		return sock_set_dns_uid(sk, optval, optlen);
+    /* END_OF_KNOX_NPA */
 
 	if (optlen < sizeof(int))
 		return -EINVAL;
@@ -1433,6 +1490,11 @@ struct sock *sk_alloc(struct net *net, int family, gfp_t priority,
 
 		sock_update_classid(sk);
 		sock_update_netprioidx(sk);
+
+		/* START_OF_KNOX_NPA */
+        sk->knox_uid = current->cred->uid.val;
+        sk->knox_pid = current->tgid;
+		/* END_OF_KNOX_NPA */
 	}
 
 	return sk;
@@ -1527,6 +1589,8 @@ struct sock *sk_clone_lock(const struct sock *sk, const gfp_t priority)
 		struct sk_filter *filter;
 
 		sock_copy(newsk, sk);
+
+		newsk->sk_prot_creator = sk->sk_prot;
 
 		/* SANITY */
 		if (likely(newsk->sk_net_refcnt))

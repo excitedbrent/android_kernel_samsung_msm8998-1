@@ -415,22 +415,24 @@ static int wdsp_download_segments(struct wdsp_mgr_priv *wdsp,
 	/* Go through the list of segments and download one by one */
 	list_for_each_entry(seg, wdsp->seg_list, list) {
 		ret = wdsp_load_each_segment(wdsp, seg);
-		if (IS_ERR_VALUE(ret)) {
-			wdsp_broadcast_event_downseq(wdsp,
-						     WDSP_EVENT_DLOAD_FAILED,
-						     NULL);
+		if (ret)
 			goto dload_error;
-		}
 	}
+
+	/* Flush the list before setting status and notifying components */
+	wdsp_flush_segment_list(wdsp->seg_list);
 
 	WDSP_SET_STATUS(wdsp, status);
 
 	/* Notify all components that image is downloaded */
 	wdsp_broadcast_event_downseq(wdsp, post, NULL);
+done:
+	return ret;
 
 dload_error:
 	wdsp_flush_segment_list(wdsp->seg_list);
-done:
+	wdsp_broadcast_event_downseq(wdsp, WDSP_EVENT_DLOAD_FAILED, NULL);
+
 	return ret;
 }
 
@@ -484,10 +486,14 @@ static int wdsp_enable_dsp(struct wdsp_mgr_priv *wdsp)
 	/* Make sure wdsp is in good state */
 	if (!WDSP_STATUS_IS_SET(wdsp, WDSP_STATUS_CODE_DLOADED)) {
 		WDSP_ERR(wdsp, "WDSP in invalid state 0x%x", wdsp->status);
-		ret = -EINVAL;
-		goto done;
+		return -EINVAL;
 	}
 
+	/*
+	 * Acquire SSR mutex lock to make sure enablement of DSP
+	 * does not race with SSR handling.
+	 */
+	WDSP_MGR_MUTEX_LOCK(wdsp, wdsp->ssr_mutex);
 	/* Download the read-write sections of image */
 	ret = wdsp_download_segments(wdsp, WDSP_ELF_FLAG_WRITE);
 	if (IS_ERR_VALUE(ret)) {
@@ -508,6 +514,7 @@ static int wdsp_enable_dsp(struct wdsp_mgr_priv *wdsp)
 	wdsp_broadcast_event_downseq(wdsp, WDSP_EVENT_POST_BOOTUP, NULL);
 	WDSP_SET_STATUS(wdsp, WDSP_STATUS_BOOTED);
 done:
+	WDSP_MGR_MUTEX_UNLOCK(wdsp, wdsp->ssr_mutex);
 	return ret;
 }
 
@@ -607,6 +614,42 @@ static struct device *wdsp_get_dev_for_cmpnt(struct device *wdsp_dev,
 	cmpnt = WDSP_GET_COMPONENT(wdsp, type);
 
 	return cmpnt->cdev;
+}
+
+static void __wdsp_collect_ramdumps_and_panic(struct wdsp_mgr_priv *wdsp)
+{
+	struct wdsp_img_section img_section;
+	int ret = 0;
+
+	pr_err("%s: enter\n", __func__);
+
+	/* Allocate memory for dumps */
+	wdsp->dump_data.rd_v_addr = dma_alloc_coherent(wdsp->mdev,
+						       (1024 * 1024) - 128,
+						       &wdsp->dump_data.rd_addr,
+						       GFP_KERNEL);
+	if (!wdsp->dump_data.rd_v_addr) {
+		WDSP_ERR(wdsp, "dma alloc for ramdumps failed");
+		return;
+	}
+
+	img_section.addr = 0x20100000 - wdsp->base_addr;
+	img_section.size = (1024 * 1024) - 128;
+	img_section.data = wdsp->dump_data.rd_v_addr;
+
+	ret = wdsp_unicast_event(wdsp, WDSP_CMPNT_TRANSPORT,
+				 WDSP_EVENT_READ_SECTION,
+				 &img_section);
+	if (IS_ERR_VALUE(ret)) {
+		WDSP_ERR(wdsp, "Failed to read dumps, size 0x%zx at addr 0x%x",
+			 img_section.size, img_section.addr);
+		return;
+	}
+
+	pr_err("%s: WDSP ram dumped at phys_addr %p", __func__,
+		&wdsp->dump_data.rd_addr);
+
+	BUG_ON(1);
 }
 
 static void wdsp_collect_ramdumps(struct wdsp_mgr_priv *wdsp)
@@ -821,9 +864,12 @@ static int wdsp_signal_handler(struct device *wdsp_dev,
 		return -EINVAL;
 
 	wdsp = dev_get_drvdata(wdsp_dev);
-	WDSP_MGR_MUTEX_LOCK(wdsp, wdsp->api_mutex);
+	if (signal == WDSP_DBG_RAMDUMP_SIGNAL) {
+		__wdsp_collect_ramdumps_and_panic(wdsp);
+		return 0;
+	}
 
-	WDSP_DBG(wdsp, "Raised signal %d", signal);
+	WDSP_MGR_MUTEX_LOCK(wdsp, wdsp->api_mutex);
 
 	switch (signal) {
 	case WDSP_IPC1_INTR:

@@ -1,4 +1,4 @@
-/* Copyright (c) 2015-2017, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2015-2018, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -482,6 +482,11 @@ static ssize_t sde_rot_evtlog_dump_read(struct file *file, char __user *buff,
 	if (__sde_rot_evtlog_dump_calc_range()) {
 		len = sde_rot_evtlog_dump_entry(evtlog_buf,
 				SDE_ROT_EVTLOG_BUF_MAX);
+		if (len < 0 || len > count) {
+			pr_err("len is more than the user buffer size\n");
+			return 0;
+		}
+
 		if (copy_to_user(buff, evtlog_buf, len))
 			return -EFAULT;
 		*ppos += len;
@@ -1103,18 +1108,29 @@ static ssize_t sde_rotator_debug_base_reg_write(struct file *file,
 	mutex_lock(&dbg->buflock);
 
 	/* Enable Clock for register access */
+	sde_rot_mgr_lock(dbg->mgr);
+	if (!sde_rotator_resource_ctrl_enabled(dbg->mgr)) {
+		SDEROT_WARN("resource ctrl is not enabled\n");
+		sde_rot_mgr_unlock(dbg->mgr);
+		goto debug_write_error;
+	}
 	sde_rotator_clk_ctrl(dbg->mgr, true);
 
 	writel_relaxed(data, dbg->base + off);
 
 	/* Disable Clock after register access */
 	sde_rotator_clk_ctrl(dbg->mgr, false);
+	sde_rot_mgr_unlock(dbg->mgr);
 
 	mutex_unlock(&dbg->buflock);
 
 	SDEROT_DBG("addr=%zx data=%x\n", off, data);
 
 	return count;
+
+debug_write_error:
+	mutex_unlock(&dbg->buflock);
+	return 0;
 }
 
 static ssize_t sde_rotator_debug_base_reg_read(struct file *file,
@@ -1152,6 +1168,12 @@ static ssize_t sde_rotator_debug_base_reg_read(struct file *file,
 		tot = 0;
 
 		/* Enable clock for register access */
+		sde_rot_mgr_lock(dbg->mgr);
+		if (!sde_rotator_resource_ctrl_enabled(dbg->mgr)) {
+			SDEROT_WARN("resource ctrl is not enabled\n");
+			sde_rot_mgr_unlock(dbg->mgr);
+			goto debug_read_error;
+		}
 		sde_rotator_clk_ctrl(dbg->mgr, true);
 
 		for (cnt = dbg->cnt; cnt > 0; cnt -= ROW_BYTES) {
@@ -1171,6 +1193,7 @@ static ssize_t sde_rotator_debug_base_reg_read(struct file *file,
 		}
 		/* Disable clock after register access */
 		sde_rotator_clk_ctrl(dbg->mgr, false);
+		sde_rot_mgr_unlock(dbg->mgr);
 
 		dbg->buf_len = tot;
 	}

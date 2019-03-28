@@ -549,7 +549,9 @@ static void process_ssid_range_report(uint8_t *buf, uint32_t len,
 	/* Don't account for pkt_id and length */
 	read_len += header_len - (2 * sizeof(uint32_t));
 
+	DIAG_LOG(DIAG_DEBUG_PERIPHERALS,"Waiting for msg_mask_lock\n");
 	mutex_lock(&driver->msg_mask_lock);
+	DIAG_LOG(DIAG_DEBUG_PERIPHERALS,"Taken msg_mask_lock\n");
 	driver->max_ssid_count[peripheral] = header->count;
 	for (i = 0; i < header->count && read_len < len; i++) {
 		ssid_range = (struct diag_ssid_range_t *)ptr;
@@ -594,6 +596,7 @@ static void process_ssid_range_report(uint8_t *buf, uint32_t len,
 		driver->msg_mask_tbl_count += 1;
 	}
 	mutex_unlock(&driver->msg_mask_lock);
+	DIAG_LOG(DIAG_DEBUG_PERIPHERALS,"Released msg_mask_lock\n");
 }
 
 static void diag_build_time_mask_update(uint8_t *buf,
@@ -618,7 +621,9 @@ static void diag_build_time_mask_update(uint8_t *buf,
 		       __func__, range->ssid_first, range->ssid_last);
 		return;
 	}
+	DIAG_LOG(DIAG_DEBUG_PERIPHERALS,"Waiting for msg_mask_lock\n");
 	mutex_lock(&driver->msg_mask_lock);
+	DIAG_LOG(DIAG_DEBUG_PERIPHERALS,"Taken msg_mask_lock\n");
 	build_mask = (struct diag_msg_mask_t *)(driver->build_time_mask->ptr);
 	num_items = range->ssid_last - range->ssid_first + 1;
 
@@ -659,6 +664,7 @@ static void diag_build_time_mask_update(uint8_t *buf,
 	driver->bt_msg_mask_tbl_count += 1;
 end:
 	mutex_unlock(&driver->msg_mask_lock);
+	DIAG_LOG(DIAG_DEBUG_PERIPHERALS,"Released msg_mask_lock\n");
 	return;
 }
 
@@ -711,6 +717,7 @@ void diag_cntl_process_read_data(struct diagfwd_info *p_info, void *buf,
 
 	while (read_len + header_len < len) {
 		ctrl_pkt = (struct diag_ctrl_pkt_header_t *)ptr;
+		DIAG_LOG(DIAG_DEBUG_PERIPHERALS,"ctrl_pkt->pkt_id = %d\n",ctrl_pkt->pkt_id);
 		switch (ctrl_pkt->pkt_id) {
 		case DIAG_CTRL_MSG_REG:
 			process_command_registration(ptr, ctrl_pkt->len,
@@ -1118,6 +1125,18 @@ void diag_map_pd_to_diagid(uint8_t pd, uint8_t *diag_id, int *peripheral)
 	case PERIPHERAL_LPASS:
 		*diag_id = DIAG_ID_LPASS;
 		*peripheral = PERIPHERAL_LPASS;
+		break;
+	case PERIPHERAL_WCNSS:
+		*diag_id = 0;
+		*peripheral = PERIPHERAL_WCNSS;
+		break;
+	case PERIPHERAL_SENSORS:
+		*diag_id = 0;
+		*peripheral = PERIPHERAL_SENSORS;
+		break;
+	case PERIPHERAL_WDSP:
+		*diag_id = 0;
+		*peripheral = PERIPHERAL_WDSP;
 		break;
 	case PERIPHERAL_CDSP:
 		*diag_id = DIAG_ID_CDSP;
