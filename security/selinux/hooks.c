@@ -1932,12 +1932,6 @@ static int may_create(struct inode *dir,
 	return avc_has_perm(newsid, sbsec->sid,
 			    SECCLASS_FILESYSTEM,
 			    FILESYSTEM__ASSOCIATE, &ad);
-	if (rc)
-		return rc;
-
-	rc = pft_inode_mknod(dir, dentry, 0, 0);
-
-	return rc;
 }
 
 /* Check whether a task can create a key. */
