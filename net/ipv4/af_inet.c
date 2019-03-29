@@ -778,7 +778,7 @@ int inet_sendmsg(struct socket *sock, struct msghdr *msg, size_t size)
 	    inet_autobind(sk))
 		return -EAGAIN;
 
-    err = sk->sk_prot->sendmsg(iocb, sk, msg, size);
+    err = sk->sk_prot->sendmsg(sk, msg, size);
 
 	/* START_OF_KNOX_NPA */
 #ifdef CONFIG_KNOX_NCM
