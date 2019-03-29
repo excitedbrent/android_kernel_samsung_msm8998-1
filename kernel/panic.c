@@ -25,9 +25,16 @@
 #include <linux/nmi.h>
 #include <linux/console.h>
 
+
 #define CREATE_TRACE_POINTS
 #include <trace/events/exception.h>
 
+#ifdef CONFIG_SEC_DEBUG
+#include <linux/qcom/sec_debug.h>
+#endif
+#ifdef CONFIG_SEC_DEBUG_SUMMARY
+#include <linux/qcom/sec_debug_summary.h>
+#endif
 #define PANIC_TIMER_STEP 100
 #define PANIC_BLINK_SPD 18
 
@@ -67,6 +74,10 @@ void __weak panic_smp_self_stop(void)
 		cpu_relax();
 }
 
+#ifdef CONFIG_SEC_ISDBT_FORCE_OFF
+void (*isdbt_force_off_callback)(void);
+#endif
+
 /**
  *	panic - halt the system
  *	@fmt: The text string to print
@@ -83,7 +94,16 @@ void panic(const char *fmt, ...)
 	long i, i_next = 0;
 	int state = 0;
 
+#ifdef CONFIG_SEC_ISDBT_FORCE_OFF
+	if (isdbt_force_off_callback)
+		isdbt_force_off_callback();
+#endif
+
 	trace_kernel_panic(0);
+
+#ifdef CONFIG_SEC_DEBUG
+	emerg_pet_watchdog(); /*To prevent watchdog reset during panic handling. */
+#endif
 
 	/*
 	 * Disable local interrupts. This will prevent panic_smp_self_stop
@@ -106,18 +126,26 @@ void panic(const char *fmt, ...)
 	if (!spin_trylock(&panic_lock))
 		panic_smp_self_stop();
 
+#ifdef CONFIG_SEC_DEBUG
+	secdbg_sched_msg("!!panic!!");
+#endif
 	console_verbose();
 	bust_spinlocks(1);
 	va_start(args, fmt);
 	vsnprintf(buf, sizeof(buf), fmt, args);
 	va_end(args);
 	pr_emerg("Kernel panic - not syncing: %s\n", buf);
+
 #ifdef CONFIG_DEBUG_BUGVERBOSE
 	/*
 	 * Avoid nested stack-dumping if a panic occurs during oops processing
 	 */
 	if (!test_taint(TAINT_DIE) && oops_in_progress <= 1)
 		dump_stack();
+#endif
+#ifdef CONFIG_SEC_DEBUG_SUMMARY
+		sec_debug_save_panic_info(buf,
+			(unsigned long)__builtin_return_address(0));
 #endif
 
 	/*

@@ -83,7 +83,7 @@ static struct glink_apps_rpm_data *glink_data;
 #define DEFAULT_BUFFER_SIZE 256
 #define DEBUG_PRINT_BUFFER_SIZE 512
 #define MAX_SLEEP_BUFFER 128
-#define GFP_FLAG(noirq) (noirq ? GFP_ATOMIC : GFP_NOFS)
+#define GFP_FLAG(noirq) (noirq ? GFP_ATOMIC : GFP_NOIO)
 #define INV_RSC "resource does not exist"
 #define ERR "err\0"
 #define MAX_ERR_BUFFER_SIZE 128
@@ -1877,6 +1877,7 @@ static void msm_rpm_trans_notify_rx(void *handle, const void *priv,
 	struct msm_rpm_wait_data *elem;
 	static DEFINE_SPINLOCK(rx_notify_lock);
 	unsigned long flags;
+	static uint32_t last_msg_id = -1;
 
 	if (!size)
 		return;
@@ -1900,6 +1901,13 @@ static void msm_rpm_trans_notify_rx(void *handle, const void *priv,
 		glink_rx_done(handle, ptr, 0);
 		return;
 	}
+
+	//pr_err("QMCK: call rpm ack for msgid %d\n", msg_id); 
+	if (last_msg_id + 1 != msg_id && last_msg_id != -1) 
+	{ 
+		pr_err ("QMCK: msg %u, last msg %u\n", msg_id, last_msg_id); 
+	} 
+	last_msg_id = msg_id; 
 
 	msm_rpm_process_ack(msg_id, errno);
 	spin_unlock_irqrestore(&rx_notify_lock, flags);

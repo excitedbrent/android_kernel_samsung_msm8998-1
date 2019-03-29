@@ -214,4 +214,19 @@ static inline int msm_pcie_configure_sid(struct device *dev, u32 *sid,
 }
 #endif /* CONFIG_PCI_MSM */
 
+#ifdef CONFIG_SEC_BSP
+int sec_pcie_l1ss_enable(void);
+int sec_pcie_l1ss_disable(void);
+#else
+inline int sec_pcie_l1ss_enable(void)
+{
+	return -ENODEV;
+}
+
+inline int sec_pcie_l1ss_disable(void)
+{
+	return -ENODEV;
+}
+#endif /* CONFIG_SEC_BSP */
+
 #endif /* __MSM_PCIE_H */

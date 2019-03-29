@@ -401,6 +401,8 @@ static int wcd_cntl_clocks_enable(struct wcd_dsp_cntl *cntl)
 			__func__, ret);
 		goto done;
 	}
+	/* Pull CPAR out of reset */
+	snd_soc_update_bits(codec, WCD934X_CPE_SS_CPAR_CTL, 0x04, 0x00);
 
 	/* Configure and Enable CPE FLL clock */
 	ret = wcd_cntl_cpe_fll_ctrl(cntl, true);
@@ -422,6 +424,7 @@ err_cpe_clk:
 	if (cntl->cdc_cb && cntl->cdc_cb->cdc_clk_en)
 		cntl->cdc_cb->cdc_clk_en(codec, false);
 
+	snd_soc_update_bits(codec, WCD934X_CPE_SS_CPAR_CTL, 0x04, 0x04);
 	WCD_CNTL_MUTEX_UNLOCK(codec, cntl->clk_mutex);
 	return ret;
 }
@@ -458,6 +461,9 @@ static int wcd_cntl_clocks_disable(struct wcd_dsp_cntl *cntl)
 		ret = -EINVAL;
 
 	cntl->is_clk_enabled = false;
+
+	/* Put CPAR in reset */
+	snd_soc_update_bits(codec, WCD934X_CPE_SS_CPAR_CTL, 0x04, 0x04);
 done:
 	WCD_CNTL_MUTEX_UNLOCK(codec, cntl->clk_mutex);
 	return ret;
@@ -469,9 +475,9 @@ static void wcd_cntl_cpar_ctrl(struct wcd_dsp_cntl *cntl,
 	struct snd_soc_codec *codec = cntl->codec;
 
 	if (enable)
-		snd_soc_write(codec, WCD934X_CPE_SS_CPAR_CTL, 0x03);
+		snd_soc_update_bits(codec, WCD934X_CPE_SS_CPAR_CTL, 0x03, 0x03);
 	else
-		snd_soc_write(codec, WCD934X_CPE_SS_CPAR_CTL, 0x00);
+		snd_soc_update_bits(codec, WCD934X_CPE_SS_CPAR_CTL, 0x03, 0x00);
 }
 
 static int wcd_cntl_enable_memory(struct wcd_dsp_cntl *cntl,
@@ -763,10 +769,6 @@ static int wcd_control_handler(struct device *dev, void *priv_data,
 	case WDSP_EVENT_DLOAD_FAILED:
 	case WDSP_EVENT_POST_SHUTDOWN:
 
-		if (event == WDSP_EVENT_POST_DLOAD_CODE)
-			/* Mark DSP online since code download is complete */
-			wcd_cntl_change_online_state(cntl, 1);
-
 		/* Disable CPAR */
 		wcd_cntl_cpar_ctrl(cntl, false);
 		/* Disable all the clocks */
@@ -775,6 +777,11 @@ static int wcd_control_handler(struct device *dev, void *priv_data,
 			dev_err(codec->dev,
 				"%s: Failed to disable clocks, err = %d\n",
 				__func__, ret);
+
+		if (event == WDSP_EVENT_POST_DLOAD_CODE)
+			/* Mark DSP online since code download is complete */
+			wcd_cntl_change_online_state(cntl, 1);
+
 		break;
 
 	case WDSP_EVENT_PRE_DLOAD_DATA:

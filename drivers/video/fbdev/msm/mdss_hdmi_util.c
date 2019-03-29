@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2016, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2010-2017, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -15,6 +15,7 @@
 
 #include <linux/io.h>
 #include <linux/delay.h>
+#include <linux/msm_mdp.h>
 #include "mdss_hdmi_util.h"
 
 #define RESOLUTION_NAME_STR_LEN 30
@@ -25,6 +26,10 @@
 #define HDMI_BUSY_WAIT_DELAY_US 100
 
 #define HDMI_SCDC_UNKNOWN_REGISTER        "Unknown register"
+
+#define HDMI_TX_YUV420_24BPP_PCLK_TMDS_CH_RATE_RATIO 2
+#define HDMI_TX_YUV422_24BPP_PCLK_TMDS_CH_RATE_RATIO 1
+#define HDMI_TX_RGB_24BPP_PCLK_TMDS_CH_RATE_RATIO 1
 
 static char res_buf[RESOLUTION_NAME_STR_LEN];
 
@@ -550,6 +555,9 @@ int msm_hdmi_get_timing_info(
 	case HDMI_VFRMT_3840x2160p60_64_27:
 		MSM_HDMI_MODES_GET_DETAILS(mode, HDMI_VFRMT_3840x2160p60_64_27);
 		break;
+	case HDMI_VFRMT_640x480p59_4_3:
+		MSM_HDMI_MODES_GET_DETAILS(mode, HDMI_VFRMT_640x480p59_4_3);
+		break;
 	default:
 		ret = hdmi_get_resv_timing_info(mode, id);
 	}
@@ -737,6 +745,30 @@ ssize_t hdmi_get_video_3d_fmt_2string(u32 format, char *buf, u32 size)
 
 	return len;
 } /* hdmi_get_video_3d_fmt_2string */
+
+int hdmi_tx_setup_tmds_clk_rate(u32 pixel_freq, u32 out_format,	bool dc_enable)
+{
+	u32 rate_ratio;
+
+	switch (out_format) {
+	case MDP_Y_CBCR_H2V2:
+		rate_ratio = HDMI_TX_YUV420_24BPP_PCLK_TMDS_CH_RATE_RATIO;
+		break;
+	case MDP_Y_CBCR_H2V1:
+		rate_ratio = HDMI_TX_YUV422_24BPP_PCLK_TMDS_CH_RATE_RATIO;
+		break;
+	default:
+		rate_ratio = HDMI_TX_RGB_24BPP_PCLK_TMDS_CH_RATE_RATIO;
+		break;
+	}
+
+	pixel_freq /= rate_ratio;
+
+	if (dc_enable)
+		pixel_freq += pixel_freq >> 2;
+
+	return pixel_freq;
+}
 
 static void hdmi_ddc_trigger(struct hdmi_tx_ddc_ctrl *ddc_ctrl,
 		enum trigger_mode mode, bool seg)

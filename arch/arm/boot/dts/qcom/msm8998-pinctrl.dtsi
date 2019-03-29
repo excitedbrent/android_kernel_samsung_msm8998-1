@@ -33,6 +33,32 @@
 			};
 		};
 
+		uart_wifidebug_default: uart_wifidebug_default {
+			mux {
+				pins = "gpio85", "gpio86";
+				function = "blsp_uart2_b";
+			};
+
+			config {
+				pins = "gpio85", "gpio86";
+				drive-strength = <2>;
+				bias-disable;
+			};
+		};
+
+		uart_wifidebug_sleep: uart_wifidebug_sleep {
+			mux {
+				pins = "gpio85", "gpio86";
+				function = "gpio";
+			};
+
+			config {
+				pins = "gpio85", "gpio86";
+				drive-strength = <2>;
+				bias-disable;
+			};
+		};
+
 		wcd9xxx_intr {
 			wcd_intr_default: wcd_intr_default{
 				mux {
@@ -582,7 +608,59 @@
 				config {
 					pins = "gpio37";
 					drive-strength = <2>;
-					bias-pull-down;
+					bias-pull-up;
+				};
+			};
+
+			pcie0_shubwake_default: pcie0_shubwake_default {
+				mux {
+					pins = "gpio125";
+					function = "gpio";
+				};
+
+				config {
+					pins = "gpio125";
+					drive-strength = <2>;
+					bias-pull-up;
+				};
+			};
+
+			pcie0_clkreq_sleep: pcie0_clkreq_sleep {
+				mux {
+					pins = "gpio36";
+					function = "gpio";
+				};
+
+				config {
+					pins = "gpio36";
+					drive-strength = <2>;
+					bias-pull-up;
+				};
+			};
+
+			pcie0_wake_sleep: pcie0_wake_sleep {
+				mux {
+					pins = "gpio37";
+					function = "gpio";
+				};
+
+				config {
+					pins = "gpio37";
+					drive-strength = <2>;
+					bias-pull-up;
+				};
+			};
+
+			pcie0_shubwake_sleep: pcie0_shubwake_sleep {
+				mux {
+					pins = "gpio125";
+					function = "gpio";
+				};
+
+				config {
+					pins = "gpio125";
+					drive-strength = <2>;
+					bias-pull-up;
 				};
 			};
 		};
@@ -1238,15 +1316,10 @@
 			};
 
 			blsp1_uart3_tx_sleep: blsp1_uart3_tx_sleep {
-				mux {
-					pins = "gpio45";
-					function = "gpio";
-				};
-
 				config {
 					pins = "gpio45";
 					drive-strength = <2>;
-					bias-pull-up;
+					output-high; 
 				};
 			};
 
@@ -1264,15 +1337,10 @@
 			};
 
 			blsp1_uart3_rxcts_sleep: blsp1_uart3_rxcts_sleep {
-				mux {
-					pins = "gpio46", "gpio47";
-					function = "gpio";
-				};
-
 				config {
 					pins = "gpio46", "gpio47";
 					drive-strength = <2>;
-					bias-no-pull;
+					bias-pull-up;
 				};
 			};
 
@@ -1290,15 +1358,10 @@
 			};
 
 			blsp1_uart3_rfr_sleep: blsp1_uart3_rfr_sleep {
-				mux {
-					pins = "gpio48";
-					function = "gpio";
-				};
-
 				config {
 					pins = "gpio48";
 					drive-strength = <2>;
-					bias-no-pull;
+					output-high; 
 				};
 			};
 		};
@@ -1508,7 +1571,7 @@
 		mdss_dp_usbplug_cc_active: mdss_dp_usbplug_cc_active {
 			mux {
 				pins = "gpio38";
-				function = "usb_phy";
+				function = "gpio";
 			};
 
 			config {
@@ -1521,7 +1584,7 @@
 		mdss_dp_usbplug_cc_suspend: mdss_dp_usbplug_cc_suspend {
 			mux {
 				pins = "gpio38";
-				function = "usb_phy";
+				function = "gpio";
 			};
 
 			config {
@@ -1624,6 +1687,52 @@
 			};
 		};
 
+		ufs_dev_reset_assert: ufs_dev_reset_assert {
+			config {
+				pins = "ufs_reset";
+				bias-pull-down;		/* default: pull down */
+				/*
+				 * UFS_RESET driver strengths are having
+				 * different values/steps compared to typical
+				 * GPIO drive strengths.
+				 *
+				 * Following table clarifies:
+				 *
+				 * HDRV value | UFS_RESET | Typical GPIO
+				 *   (dec)    |   (mA)    |    (mA)
+				 *     0      |   0.8     |    2
+				 *     1      |   1.55    |    4
+				 *     2      |   2.35    |    6
+				 *     3      |   3.1     |    8
+				 *     4      |   3.9     |    10
+				 *     5      |   4.65    |    12
+				 *     6      |   5.4     |    14
+				 *     7      |   6.15    |    16
+				 *
+				 * POR value for UFS_RESET HDRV is 3 which means
+				 * 3.1mA and we want to use that. Hence just
+				 * specify 8mA to "drive-strength" binding and
+				 * that should result into writing 3 to HDRV
+				 * field.
+				 */
+				drive-strength = <8>;	/* default: 3.1 mA */
+				output-low; /* active low reset */
+			};
+		};
+
+		ufs_dev_reset_deassert: ufs_dev_reset_deassert {
+			config {
+				pins = "ufs_reset";
+				bias-pull-down;		/* default: pull down */
+				/*
+				 * default: 3.1 mA
+				 * check comments under ufs_dev_reset_assert
+				 */
+				drive-strength = <8>;
+				output-high; /* active low reset */
+			};
+		};
+
 		sdc2_clk_on: sdc2_clk_on {
 			config {
 				pins = "sdc2_clk";
@@ -1644,7 +1753,7 @@
 			config {
 				pins = "sdc2_cmd";
 				bias-pull-up;		/* pull up */
-				drive-strength = <10>;	/* 10 MA */
+				drive-strength = <8>;	/* 8 MA */
 			};
 		};
 
@@ -1660,7 +1769,7 @@
 			config {
 				pins = "sdc2_data";
 				bias-pull-up;		/* pull up */
-				drive-strength = <10>;	/* 10 MA */
+				drive-strength = <8>;	/* 8 MA */
 			};
 		};
 
@@ -1680,7 +1789,7 @@
 
 			config {
 				pins = "gpio95";
-				bias-pull-up;           /* pull up */
+				bias-disable;           /* NO pull */
 				drive-strength = <2>;   /* 2 MA */
 			};
 		};
@@ -1693,7 +1802,7 @@
 
 			config {
 				pins = "gpio95";
-				bias-pull-up;           /* pull up */
+				bias-disable;           /* NO pull */
 				drive-strength = <2>;   /* 2 MA */
 			};
 

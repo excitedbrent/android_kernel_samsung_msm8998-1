@@ -1,5 +1,4 @@
-/*
- * Copyright (c) 2016, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -411,22 +410,24 @@ static int wdsp_download_segments(struct wdsp_mgr_priv *wdsp,
 	/* Go through the list of segments and download one by one */
 	list_for_each_entry(seg, wdsp->seg_list, list) {
 		ret = wdsp_load_each_segment(wdsp, seg);
-		if (IS_ERR_VALUE(ret)) {
-			wdsp_broadcast_event_downseq(wdsp,
-						     WDSP_EVENT_DLOAD_FAILED,
-						     NULL);
+		if (ret)
 			goto dload_error;
-		}
 	}
+
+	/* Flush the list before setting status and notifying components */
+	wdsp_flush_segment_list(wdsp->seg_list);
 
 	WDSP_SET_STATUS(wdsp, status);
 
 	/* Notify all components that image is downloaded */
 	wdsp_broadcast_event_downseq(wdsp, post, NULL);
+done:
+	return ret;
 
 dload_error:
 	wdsp_flush_segment_list(wdsp->seg_list);
-done:
+	wdsp_broadcast_event_downseq(wdsp, WDSP_EVENT_DLOAD_FAILED, NULL);
+
 	return ret;
 }
 
@@ -480,10 +481,14 @@ static int wdsp_enable_dsp(struct wdsp_mgr_priv *wdsp)
 	/* Make sure wdsp is in good state */
 	if (!WDSP_STATUS_IS_SET(wdsp, WDSP_STATUS_CODE_DLOADED)) {
 		WDSP_ERR(wdsp, "WDSP in invalid state 0x%x", wdsp->status);
-		ret = -EINVAL;
-		goto done;
+		return -EINVAL;
 	}
 
+	/*
+	 * Acquire SSR mutex lock to make sure enablement of DSP
+	 * does not race with SSR handling.
+	 */
+	WDSP_MGR_MUTEX_LOCK(wdsp, wdsp->ssr_mutex);
 	/* Download the read-write sections of image */
 	ret = wdsp_download_segments(wdsp, WDSP_ELF_FLAG_WRITE);
 	if (IS_ERR_VALUE(ret)) {
@@ -504,6 +509,7 @@ static int wdsp_enable_dsp(struct wdsp_mgr_priv *wdsp)
 	wdsp_broadcast_event_downseq(wdsp, WDSP_EVENT_POST_BOOTUP, NULL);
 	WDSP_SET_STATUS(wdsp, WDSP_STATUS_BOOTED);
 done:
+	WDSP_MGR_MUTEX_UNLOCK(wdsp, wdsp->ssr_mutex);
 	return ret;
 }
 
@@ -881,12 +887,50 @@ done:
 
 static int wdsp_suspend(struct device *wdsp_dev)
 {
-	return 0;
+	struct wdsp_mgr_priv *wdsp;
+	int rc = 0, i;
+
+	if (!wdsp_dev) {
+		pr_err("%s: Invalid handle to device\n", __func__);
+		return -EINVAL;
+	}
+
+	wdsp = dev_get_drvdata(wdsp_dev);
+
+	for (i =  WDSP_CMPNT_TYPE_MAX - 1; i >= 0; i--) {
+		rc = wdsp_unicast_event(wdsp, i, WDSP_EVENT_SUSPEND, NULL);
+		if (rc < 0) {
+			WDSP_ERR(wdsp, "component %s failed to suspend\n",
+				WDSP_GET_CMPNT_TYPE_STR(i));
+			break;
+		}
+	}
+
+	return rc;
 }
 
 static int wdsp_resume(struct device *wdsp_dev)
 {
-	return 0;
+	struct wdsp_mgr_priv *wdsp;
+	int rc = 0, i;
+
+	if (!wdsp_dev) {
+		pr_err("%s: Invalid handle to device\n", __func__);
+		return -EINVAL;
+	}
+
+	wdsp = dev_get_drvdata(wdsp_dev);
+
+	for (i =  0; i < WDSP_CMPNT_TYPE_MAX; i++) {
+		rc = wdsp_unicast_event(wdsp, i, WDSP_EVENT_RESUME, NULL);
+		if (rc < 0) {
+			WDSP_ERR(wdsp, "component %s failed to resume\n",
+				WDSP_GET_CMPNT_TYPE_STR(i));
+			break;
+		}
+	}
+
+	return rc;
 }
 
 static struct wdsp_mgr_ops wdsp_ops = {

@@ -680,12 +680,13 @@ int cpr3_parse_common_corner_data(struct cpr3_regulator *vreg)
 	}
 
 	/*
-	 * In CPRh compliant controllers an additional corner is
-	 * allocated to correspond to the APM crossover voltage
+	 * For CPRh compliant controllers two additional corners are
+	 * allocated to correspond to the APM crossover voltage and the MEM ACC
+	 * crossover voltage.
 	 */
 	vreg->corner = devm_kcalloc(ctrl->dev, ctrl->ctrl_type ==
 				    CPR_CTRL_TYPE_CPRH ?
-				    vreg->corner_count + 1 :
+				    vreg->corner_count + 2 :
 				    vreg->corner_count,
 				    sizeof(*vreg->corner), GFP_KERNEL);
 	temp = kcalloc(vreg->corner_count, sizeof(*temp), GFP_KERNEL);
@@ -2083,3 +2084,188 @@ void cprh_adjust_voltages_for_apm(struct cpr3_regulator *vreg)
 				corner->ceiling_volt, corner->open_loop_volt);
 	}
 }
+
+/**
+ * cprh_adjust_voltages_for_mem_acc() - adjust per-corner floor and ceiling
+ *		voltages so that they do not intersect the MEM ACC threshold
+ *		voltage
+ * @vreg:		Pointer to the CPR3 regulator
+ *
+ * The following algorithm is applied:
+ *	if floor < threshold <= ceiling:
+ *		if open_loop >= threshold, then floor = threshold
+ *		else ceiling = threshold - step
+ * where:
+ *	step = voltage in microvolts of a single step of the VDD supply
+ *
+ * The open-loop voltage is also bounded by the new floor or ceiling value as
+ * needed.
+ *
+ * Return: none
+ */
+void cprh_adjust_voltages_for_mem_acc(struct cpr3_regulator *vreg)
+{
+	struct cpr3_controller *ctrl = vreg->thread->ctrl;
+	struct cpr3_corner *corner;
+	int i, threshold, prev_ceiling, prev_floor, prev_open_loop;
+
+	if (!ctrl->mem_acc_threshold_volt) {
+		/* MEM ACC not being used. */
+		return;
+	}
+
+	ctrl->mem_acc_threshold_volt = CPR3_ROUND(ctrl->mem_acc_threshold_volt,
+						ctrl->step_volt);
+
+	threshold = ctrl->mem_acc_threshold_volt;
+
+	for (i = 0; i < vreg->corner_count; i++) {
+		corner = &vreg->corner[i];
+
+		if (threshold <= corner->floor_volt
+		    || threshold > corner->ceiling_volt)
+			continue;
+
+		prev_floor = corner->floor_volt;
+		prev_ceiling = corner->ceiling_volt;
+		prev_open_loop = corner->open_loop_volt;
+
+		if (corner->open_loop_volt >= threshold) {
+			corner->floor_volt = max(corner->floor_volt, threshold);
+			if (corner->open_loop_volt < corner->floor_volt)
+				corner->open_loop_volt = corner->floor_volt;
+		} else {
+			corner->ceiling_volt = threshold - ctrl->step_volt;
+		}
+
+		if (corner->floor_volt != prev_floor
+		    || corner->ceiling_volt != prev_ceiling
+		    || corner->open_loop_volt != prev_open_loop)
+			cpr3_debug(vreg, "MEM ACC threshold=%d changed corner %d voltages; prev: floor=%d, ceiling=%d, open-loop=%d; new: floor=%d, ceiling=%d, open-loop=%d\n",
+				threshold, i, prev_floor, prev_ceiling,
+				prev_open_loop, corner->floor_volt,
+				corner->ceiling_volt, corner->open_loop_volt);
+	}
+}
+
+struct {
+	struct cpr3_controller *ctrl;
+	int *fuse_volt;
+} apps_cpr_saved_info[2];
+
+int cpr3_save_fused_open_loop_voltage(struct cpr3_regulator *vreg, int *fuse_volt)
+{
+	int id;
+
+	if (!vreg) {
+		cpr3_err(vreg, "fail to save fused open loop voltage.\n");
+		return -1;
+	}
+
+	id = vreg->thread->ctrl->ctrl_id;
+	if (id >= 2) {
+		cpr3_err(vreg, "fail to save fused open loop voltage. id(%d)\n", id);
+		return -1;
+	}
+
+	if (apps_cpr_saved_info[id].ctrl) {
+		cpr3_err(vreg, "fail to save fused open loop voltage. id(%d), ctrl(%p)\n",
+			id, apps_cpr_saved_info[id].ctrl);
+		return -1;
+	}
+
+	apps_cpr_saved_info[id].ctrl = vreg->thread->ctrl;
+
+	apps_cpr_saved_info[id].fuse_volt = kcalloc(vreg->fuse_corner_count,
+				sizeof(*fuse_volt), GFP_KERNEL);
+
+	memcpy((void *)apps_cpr_saved_info[id].fuse_volt, (void *)fuse_volt,
+		vreg->fuse_corner_count * sizeof(*fuse_volt));
+
+	return 0;
+}
+
+int cpr3_get_fuse_open_loop_voltage(int id, int fuse_corner)
+{
+	struct cpr3_controller *ctrl;
+
+	if (!apps_cpr_saved_info[id].ctrl) {
+		pr_err("%s : cpr info isn't saved. id(%d)\n", __func__, id);
+		return -1;
+	}
+
+	ctrl = apps_cpr_saved_info[id].ctrl;
+	if (fuse_corner >= ctrl->thread->vreg->fuse_corner_count) {
+		pr_err("%s : cpr info isn't saved. id(%d), corner(%d)\n",
+			__func__, id, fuse_corner);
+		return -2;
+	}
+
+	if (!apps_cpr_saved_info[id].fuse_volt) {
+		pr_err("%s : cpr info is invalid. id(%d)\n", __func__, id);
+		return -3;
+	}
+
+	return apps_cpr_saved_info[id].fuse_volt[fuse_corner];
+}
+EXPORT_SYMBOL(cpr3_get_fuse_open_loop_voltage);
+
+int cpr3_get_fuse_corner_count(int id)
+{
+	struct cpr3_controller *ctrl;
+
+	if (!apps_cpr_saved_info[id].ctrl) {
+		pr_err("%s : cpr info isn't saved. id(%d)\n", __func__, id);
+		return -1;
+	}
+
+	ctrl = apps_cpr_saved_info[id].ctrl;
+
+	if (!ctrl->thread || !ctrl->thread->vreg) {
+		pr_err("%s : cpr info is invalid. id(%d)\n", __func__, id);
+		return -2;
+	}
+
+	return ctrl->thread->vreg->fuse_corner_count;
+}
+EXPORT_SYMBOL(cpr3_get_fuse_corner_count);
+
+int cpr3_get_fuse_cpr_rev(int id)
+{
+	struct cpr3_controller *ctrl;
+
+	if (!apps_cpr_saved_info[id].ctrl) {
+		pr_err("%s : cpr info isn't saved. id(%d)\n", __func__, id);
+		return -1;
+	}
+
+	ctrl = apps_cpr_saved_info[id].ctrl;
+
+	if (!ctrl->thread || !ctrl->thread->vreg) {
+		pr_err("%s : cpr info is invalid. id(%d)\n", __func__, id);
+		return -2;
+	}
+
+	return ctrl->thread->vreg->cpr_rev_fuse;
+}
+EXPORT_SYMBOL(cpr3_get_fuse_spr_rev);
+
+int cpr3_get_fuse_speed_bin(int id)
+{
+	struct cpr3_controller *ctrl;
+
+	if (!apps_cpr_saved_info[id].ctrl) {
+		pr_err("%s : cpr info isn't saved. id(%d)\n", __func__, id);
+		return -1;
+	}
+
+	ctrl = apps_cpr_saved_info[id].ctrl;
+
+	if (!ctrl->thread || !ctrl->thread->vreg) {
+		pr_err("%s : cpr info is invalid. id(%d)\n", __func__, id);
+		return -2;
+	}
+
+	return ctrl->thread->vreg->speed_bin_fuse;
+}
+EXPORT_SYMBOL(cpr3_get_fuse_speed_bin);

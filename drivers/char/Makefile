@@ -65,3 +65,7 @@ obj-$(CONFIG_MSM_ADSPRPC)       += adsprpc.o
 ifdef CONFIG_COMPAT
 obj-$(CONFIG_MSM_ADSPRPC)       += adsprpc_compat.o
 endif
+
+obj-$(CONFIG_KNOX_KAP)		+= knox_kap.o
+obj-$(CONFIG_MST_LDO)		+= mst_ctrl.o
+

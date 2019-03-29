@@ -125,6 +125,44 @@ SECTIONS
 	NOTES
 
 	. = ALIGN(SEGMENT_ALIGN);
+#ifdef CONFIG_TIMA_RKP
+	. = ALIGN(PAGE_SIZE);
+	.rkp.bitmap : {
+		rkp_pgt_bitmap = .;
+		*(.rkp.bitmap)
+	}
+	. = ALIGN(PAGE_SIZE);
+	.rkp.dblmap : {
+		rkp_map_bitmap = .;
+		*(.rkp.dblmap) 
+	}
+#ifdef CONFIG_RKP_KDP
+	 /* Creating a new section to store task credentials */
+	. = ALIGN(PAGE_SIZE);
+	.rkp.prot.page : {
+		__rkp_ro_start = .;
+	}
+	. = ALIGN(PAGE_SIZE);
+#endif /* CONFIG_RKP_KDP*/
+	. = ALIGN(PAGE_SIZE);
+	idmap_pg_dir = .;
+	. += IDMAP_DIR_SIZE;
+	. = ALIGN(PAGE_SIZE);
+	swapper_pg_dir = .;
+	. += SWAPPER_DIR_SIZE;
+
+	. = ALIGN(PAGE_SIZE);
+	bm_pte = .;
+	. += PAGE_SIZE;
+	. = ALIGN(PAGE_SIZE);
+	bm_pmd = .;
+	. += PAGE_SIZE;
+	. = ALIGN(PAGE_SIZE);
+	bm_pud = .;
+	. += PAGE_SIZE;
+#endif /* CONFIG_TIMA_RKP */
+
+	. = ALIGN(SEGMENT_ALIGN);
 	_etext = .;			/* End of text and rodata section */
 	__init_begin = .;
 
@@ -156,6 +194,19 @@ SECTIONS
 	.altinstr_replacement : {
 		*(.altinstr_replacement)
 	}
+#ifdef CONFIG_RELOCATABLE_KERNEL
+	.rela : {
+		. = ALIGN(8);
+		__reloc_start = .;
+		*(.rela .rela*)
+		__reloc_end = .;
+	}
+	.dynsym : {
+		. = ALIGN(8);
+		__dynsym_start = .;
+		*(.dynsym)
+	}
+#else
 	.rela : ALIGN(8) {
 		*(.rela .rela*)
 	}
@@ -165,6 +216,7 @@ SECTIONS
 	.dynstr : {
 		*(.dynstr)
 	}
+#endif 
 	.hash : {
 		*(.hash)
 	}
@@ -184,11 +236,15 @@ SECTIONS
 
 	BSS_SECTION(0, 0, 0)
 
+#ifndef CONFIG_TIMA_RKP
 	. = ALIGN(PAGE_SIZE);
 	idmap_pg_dir = .;
 	. += IDMAP_DIR_SIZE;
 	swapper_pg_dir = .;
 	. += SWAPPER_DIR_SIZE;
+#else
+	. = ALIGN(PAGE_SIZE);
+#endif
 
 	_end = .;
 

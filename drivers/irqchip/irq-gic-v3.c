@@ -289,6 +289,9 @@ static int gic_irq_get_irqchip_state(struct irq_data *d,
 }
 static void gic_disable_irq(struct irq_data *d)
 {
+	/* don't lazy-disable PPIs */ 
+	if (gic_irq(d) < 32) 
+	gic_mask_irq(d);
 	if (gic_arch_extn.irq_disable)
 		gic_arch_extn.irq_disable(d);
 }
@@ -411,6 +414,11 @@ static int gic_suspend(void)
 	return 0;
 }
 
+#ifdef CONFIG_SEC_PM
+extern char last_resume_kernel_reason[];
+extern int last_resume_kernel_reason_len;
+#endif
+
 static void gic_show_resume_irq(struct gic_chip_data *gic)
 {
 	unsigned int i;
@@ -440,6 +448,12 @@ static void gic_show_resume_irq(struct gic_chip_data *gic)
 			name = desc->action->name;
 
 		pr_warn("%s: %d triggered %s\n", __func__, irq, name);
+
+#ifdef CONFIG_SEC_PM
+		last_resume_kernel_reason_len += 
+			sprintf(last_resume_kernel_reason + last_resume_kernel_reason_len,
+			"HWIRQ %d(irq %d), %s|", i, irq, name);
+#endif
 	}
 }
 

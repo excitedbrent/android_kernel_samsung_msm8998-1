@@ -997,10 +997,8 @@ static int msm_open(struct file *filep)
 	BUG_ON(!pvdev);
 
 	/* !!! only ONE open is allowed !!! */
-	if (atomic_read(&pvdev->opened))
+	if (atomic_cmpxchg(&pvdev->opened, 0, 1))
 		return -EBUSY;
-
-	atomic_set(&pvdev->opened, 1);
 
 	spin_lock_irqsave(&msm_pid_lock, flags);
 	msm_pid = get_pid(task_pid(current));
@@ -1309,6 +1307,21 @@ video_fail:
 pvdev_fail:
 	kzfree(msm_v4l2_dev);
 probe_end:
+	return rc;
+}
+
+int msm_send_event(char *sd_name, uint32_t cmd) {
+	int rc = -1;
+	struct msm_sd_subdev *msm_sd;
+	if (!list_empty(&msm_v4l2_dev->subdevs))
+		list_for_each_entry(msm_sd, &ordered_sd_list, list) {
+			if (strcmp(msm_sd->sd.name, sd_name) == 0) {
+				rc = v4l2_subdev_call(&msm_sd->sd, core, ioctl,
+					cmd, NULL);
+				if (rc == 0)
+					return 0;
+			}
+		}
 	return rc;
 }
 

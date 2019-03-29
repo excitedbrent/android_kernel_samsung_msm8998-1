@@ -36,6 +36,9 @@
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/of.h>
+#include <linux/of_platform.h>
+#include <linux/gpio.h>
+#include <linux/of_gpio.h>
 
 #include "ufshcd.h"
 #include "ufshcd-pltfrm.h"
@@ -250,6 +253,20 @@ static void ufshcd_parse_pm_levels(struct ufs_hba *hba)
 	}
 }
 
+static int ufshcd_parse_pinctrl_info(struct ufs_hba *hba)
+{
+	int ret = 0;
+
+	/* Try to obtain pinctrl handle */
+	hba->pctrl = devm_pinctrl_get(hba->dev);
+	if (IS_ERR(hba->pctrl)) {
+		ret = PTR_ERR(hba->pctrl);
+		hba->pctrl = NULL;
+	}
+
+	return ret;
+}
+
 #ifdef CONFIG_SMP
 /**
  * ufshcd_pltfrm_suspend - suspend power management function
@@ -302,6 +319,49 @@ void ufshcd_pltfrm_shutdown(struct platform_device *pdev)
 	ufshcd_shutdown((struct ufs_hba *)platform_get_drvdata(pdev));
 }
 EXPORT_SYMBOL_GPL(ufshcd_pltfrm_shutdown);
+
+static void ufshcd_parse_gpio_controls(struct ufs_hba *hba)
+{
+	struct device *dev = hba->dev;
+	struct device_node *np = dev->of_node;
+	struct pinctrl *ufs_hw_reset_pinctrl;
+	struct pinctrl_state *ufs_power_on;
+	struct pinctrl_state *ufs_power_off;
+	int ret = 0;
+
+	hba->hw_reset_gpio = of_get_named_gpio(np, "sec-ufs,hw-reset-gpio", 0);
+
+	if (!gpio_is_valid(hba->hw_reset_gpio))
+		return;
+
+	pr_err("UFS get hw_reset gpio %d.\n", hba->hw_reset_gpio);
+
+	ufs_hw_reset_pinctrl = devm_pinctrl_get(dev);
+	if (IS_ERR(ufs_hw_reset_pinctrl)) {
+		pr_err("%s: pinctrl_get is failed.\n", __func__);
+		ufs_hw_reset_pinctrl = NULL;
+	} else {
+		ufs_power_on = pinctrl_lookup_state(ufs_hw_reset_pinctrl, "ufs_poweron");
+		if (IS_ERR(ufs_power_on)) {
+			pr_err("%s: fail to ufs_poweron lookup_state.\n", __func__);
+			goto err_exit;
+		}
+
+		ufs_power_off = pinctrl_lookup_state(ufs_hw_reset_pinctrl, "ufs_poweroff");
+		if (IS_ERR(ufs_power_off)) {
+			pr_err("%s: fail to ufs_poweroff lookup_state.\n", __func__);
+			goto err_exit;
+		}
+
+		ret = pinctrl_select_state(ufs_hw_reset_pinctrl, ufs_power_on);
+		if (ret)
+			pr_err("%s: fail to select_state ufs power on.\n", __func__);
+
+ err_exit:
+		devm_pinctrl_put(ufs_hw_reset_pinctrl);
+	}
+	return;
+}
 
 /**
  * ufshcd_pltfrm_init - probe routine of the driver
@@ -361,7 +421,16 @@ int ufshcd_pltfrm_init(struct platform_device *pdev,
 		goto dealloc_host;
 	}
 
+	err = ufshcd_parse_pinctrl_info(hba);
+	if (err) {
+		dev_dbg(&pdev->dev, "%s: unable to parse pinctrl data %d\n",
+				__func__, err);
+		/* let's not fail the probe */
+	}
+
 	ufshcd_parse_pm_levels(hba);
+
+	ufshcd_parse_gpio_controls(hba);
 
 	if (!dev->dma_mask)
 		dev->dma_mask = &dev->coherent_dma_mask;

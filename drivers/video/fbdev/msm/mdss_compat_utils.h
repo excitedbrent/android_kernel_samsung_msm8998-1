@@ -505,7 +505,8 @@ struct mdp_input_layer32 {
 	struct mdp_layer_buffer	buffer;
 	compat_caddr_t		pp_info;
 	int			error_code;
-	uint32_t		reserved[6];
+	uint32_t		rect_num;
+	uint32_t		reserved[5];
 };
 
 struct mdp_output_layer32 {
@@ -523,7 +524,10 @@ struct mdp_layer_commit_v1_32 {
 	uint32_t		input_layer_cnt;
 	compat_caddr_t		output_layer;
 	int			retire_fence;
-	uint32_t		reserved[6];
+	void __user		*dest_scaler;
+	uint32_t		dest_scaler_cnt;
+	uint32_t		dsu_mode;
+	uint32_t		reserved[MDP_LAYER_COMMIT_V1_PAD - 1];
 };
 
 struct mdp_layer_commit32 {

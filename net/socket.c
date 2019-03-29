@@ -557,6 +557,13 @@ static struct socket *sock_alloc(void)
 
 	sock = SOCKET_I(inode);
 
+	/* START_OF_KNOX_VPN */
+    if(sock) {
+        sock->knox_sent = 0;
+        sock->knox_recv = 0;
+    }
+    /* END_OF_KNOX_VPN */
+
 	kmemcheck_annotate_bitfield(sock, type);
 	inode->i_ino = get_next_ino();
 	inode->i_mode = S_IFSOCK | S_IRWXUGO;
@@ -595,6 +602,12 @@ void sock_release(struct socket *sock)
 		iput(SOCK_INODE(sock));
 		return;
 	}
+
+	/* START_OF_KNOX_VPN */
+    sock->knox_sent = 0;
+    sock->knox_recv = 0;
+    /* END_OF_KNOX_VPN */
+
 	sock->file = NULL;
 }
 EXPORT_SYMBOL(sock_release);
@@ -3336,6 +3349,46 @@ int kernel_sock_shutdown(struct socket *sock, enum sock_shutdown_cmd how)
 	return sock->ops->shutdown(sock, how);
 }
 EXPORT_SYMBOL(kernel_sock_shutdown);
+
+/*	This routine returns the IP overhead imposed by a socket i.e.
+ *	the length of the underlying IP header, depending on whether
+ *	this is an IPv4 or IPv6 socket and the length from IP options turned
+ *	on at the socket.
+ */
+u32 kernel_sock_ip_overhead(struct sock *sk)
+{
+	struct inet_sock *inet;
+	struct ipv6_pinfo *np;
+	struct ip_options_rcu *opt = NULL;
+	struct ipv6_txoptions *optv6 = NULL;
+	u32 overhead = 0;
+
+	if (!sk)
+		return overhead;
+	switch (sk->sk_family) {
+	case AF_INET:
+		inet = inet_sk(sk);
+		overhead += sizeof(struct iphdr);
+		if (inet)
+			opt = rcu_dereference_protected(inet->inet_opt,
+							sock_owned_by_user(sk));
+		if (opt)
+			overhead += opt->opt.optlen;
+		return overhead;
+	case AF_INET6:
+		np = inet6_sk(sk);
+		overhead += sizeof(struct ipv6hdr);
+		if (np)
+			optv6 = rcu_dereference_protected(np->opt,
+							  sock_owned_by_user(sk));
+		if (optv6)
+			overhead += (optv6->opt_flen + optv6->opt_nflen);
+		return overhead;
+	default: /* Returns 0 overhead if the socket is not ipv4 or ipv6 */
+		return overhead;
+	}
+}
+EXPORT_SYMBOL(kernel_sock_ip_overhead);
 
 int sockev_register_notify(struct notifier_block *nb)
 {

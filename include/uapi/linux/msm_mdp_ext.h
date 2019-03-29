@@ -31,6 +31,12 @@
 					      struct mdp_set_cfg)
 
 /*
+ * Ioctl for setting the PLL PPM.
+ * PLL PPM is passed by the user space using this IOCTL.
+ */
+#define MSMFB_MDP_SET_PANEL_PPM _IOW(MDP_IOCTL_MAGIC, 131, int)
+
+/*
  * To allow proper structure padding for 64bit/32bit target
  */
 #ifdef __LP64
@@ -163,7 +169,15 @@ VALIDATE/COMMIT FLAG CONFIGURATION
  */
 #define MDP_COMMIT_CWB_DSPP 0x1000
 
+/*
+ * Flag to indicate that rectangle number is being assigned
+ * by userspace in multi-rectangle mode
+ */
+#define MDP_COMMIT_RECT_NUM 0x2000
+
 #define MDP_COMMIT_VERSION_1_0		0x00010000
+
+#define OUT_LAYER_COLOR_SPACE
 
 /**********************************************************************
 Configuration structures
@@ -337,8 +351,13 @@ struct mdp_input_layer {
 	 */
 	int			error_code;
 
+	/*	 * For source pipes supporting multi-rectangle, this field identifies
+	 * the rectangle index of the source pipe.
+	 */
+	uint32_t		rect_num;
+
 	/* 32bits reserved value for future usage. */
-	uint32_t		reserved[6];
+	uint32_t		reserved[5];
 };
 
 struct mdp_output_layer {
@@ -357,8 +376,11 @@ struct mdp_output_layer {
 	/* Buffer attached with output layer. Device uses it for commit call */
 	struct mdp_layer_buffer		buffer;
 
+	/* color space of the destination */
+	enum mdp_color_space		color_space;
+
 	/* 32bits reserved value for future usage. */
-	uint32_t			reserved[6];
+	uint32_t			reserved[5];
 };
 
 /*
@@ -474,8 +496,13 @@ struct mdp_layer_commit_v1 {
 	 */
 	uint32_t		dest_scaler_cnt;
 
+	/* MULTI_RESOLUTION
+	 * 0 : WQHD, 1 : FHD, 2 : HD
+	 */
+	uint32_t		dsu_mode;
+
 	/* 32-bits reserved value for future usage. */
-	uint32_t		reserved[MDP_LAYER_COMMIT_V1_PAD];
+	uint32_t		reserved[MDP_LAYER_COMMIT_V1_PAD - 1];
 };
 
 /*
